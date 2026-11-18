@@ -8,7 +8,7 @@ The crate builds the CUDA runtime on Linux and Windows. On macOS it builds empty
 
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
-volkit = { git = "https://github.com/praveenperera/volkit", rev = "<sha>" }
+volkit = "0.1"
 ```
 
 At run time it needs an NVIDIA driver, `libcudnn.so.9` (cuDNN 9) and `libcublas.so.12` on the loader path. cudakit
@@ -169,17 +169,25 @@ impl Export {
     /// dicts and inert stub objects; it never imports or calls anything the file names
     pub fn afv_v2(dir: &Path) -> Result<Self>;
 
-    /// Writes `path` (`.safetensors`) and its `.json` sidecar beside it, tensor for tensor what the Python export
-    /// writes, so `AfvV2::open(path, ..)` can load it later without the conversion
+    /// Writes `path` (`.safetensors`) and its `.json` sidecar beside it. The `.safetensors` is byte for byte what
+    /// the Python export writes, so `AfvV2::open(path, ..)` can load it later without the conversion
     pub fn write(&self, path: &Path) -> Result<()>;
+
+    /// The unique tensors (name -> (shape, float32 data)) and aliases (alias -> target), for an in-memory load
+    pub fn into_parts(self) -> (volkit::weights::Tensors, BTreeMap<String, String>, serde_json::Value);
 }
 ```
+
+The reader underneath is `volkit::pth`: `Pth::open(path)` maps a `.pth`, checks its zip directory and unpickles
+`data.pkl` into a `pth::Value` tree whose tensors (`pth::TensorRef`) are read with `Pth::tensor_f32`. It only
+accepts little-endian float32 storages, contiguous tensors and stored (uncompressed) zip entries, the form
+`torch.save` writes.
 
 ## Environment variables
 
 | Variable | Effect |
 | --- | --- |
-| `VOLKIT_PTX_TIER` | Force a PTX tier at or below the device's (`sm75`, `sm80`, `sm120`) |
+| `VOLKIT_PTX_TIER` | Force a PTX tier at or below the device's (`sm80` or `sm120`) |
 | `VOLKIT_CACHE_DIR` | Root of the on-disk caches (cuDNN algorithm choices, the driver's compiled-PTX cache) |
 | `VOLKIT_ALGO_CACHE` | `0`, `off` or `false` turns the cuDNN algorithm cache off |
 

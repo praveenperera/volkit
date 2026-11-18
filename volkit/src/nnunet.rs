@@ -478,4 +478,23 @@ mod tests {
         assert!(!contract.keys.keys().any(|k| ["centre.", "affinity.", "direction."].iter().any(|h| k.starts_with(h))));
         assert!(params > 1_000_000, "{params} parameters");
     }
+
+    /// The model-folder path of `AfvV2::open`, up to the GPU: the torch-free conversion must load as a
+    /// checkpoint against its own sidecar and feed the forward every tensor exactly once
+    #[test]
+    fn afv2_model_folder_loads_every_tensor_once() {
+        let dir = std::path::PathBuf::from(std::env::var_os("VOLKIT_AFV2_MODEL").unwrap_or_default());
+        if !dir.join("checkpoint_final.pth").is_file() {
+            eprintln!("skipped: no nnU-Net model folder at {}", dir.display());
+            return;
+        }
+
+        let (tensors, aliases, sidecar) = export::Export::afv_v2(&dir).expect("afv-v2 conversion").into_parts();
+        let ck = crate::weights::Checkpoint::with_sidecar(tensors, aliases, &sidecar).expect("checkpoint");
+        let contract = Contract::from_sidecar(&sidecar).expect("afv2 sidecar");
+        contract.afv_v2().expect("afv-v2");
+        crate::unet3d::model::HostNet::take(&ck, &contract.program, Precision::Tf32).expect("host net");
+        let (tensors, _, _) = ck.finish().expect("every tensor read");
+        assert_eq!(tensors, contract.keys.len());
+    }
 }
