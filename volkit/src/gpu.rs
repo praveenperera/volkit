@@ -29,6 +29,7 @@ pub struct Cubin {
     pub tier: PtxTier,
     /// The family it was compiled for; it also runs on later minor versions of the same major
     pub arch: ComputeCapability,
+    /// The cubin's SASS image
     pub bytes: &'static [u8],
 }
 
@@ -140,7 +141,9 @@ enum Param {
 pub enum Arg {
     /// Address and length in elements of the kernel's slice type
     Slice(u64, u64),
+    /// A 32-bit unsigned integer passed by value
     U32(u32),
+    /// A 32-bit float passed by value
     F32(f32),
 }
 
@@ -232,6 +235,7 @@ pub struct Gpu {
     module: Arc<CudaModule>,
     ptx: &'static str,
     kernels: Kernels,
+    /// The underlying cudakit GPU, which owns the context and stream
     pub inner: cudakit::Gpu,
 }
 

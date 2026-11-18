@@ -36,9 +36,13 @@ pub(crate) enum Codec {
 
 /// A whole `[Z, H, W]` uint8 volume in memory, C order
 pub struct Volume {
+    /// Slices along the first axis
     pub depth: usize,
+    /// Rows per slice
     pub height: usize,
+    /// Columns per row
     pub width: usize,
+    /// The voxels, `depth * height * width` bytes in C order
     pub data: Vec<u8>,
     /// The array directory actually read
     pub array: PathBuf,
@@ -78,9 +82,13 @@ pub const MAX_VOLUME_BYTES: usize = u32::MAX as usize;
 /// A borrowed `[Z, H, W]` uint8 volume, C order: a [`Volume`] read from zarr, or a caller's array
 #[derive(Clone, Copy, Debug)]
 pub struct VolumeRef<'a> {
+    /// Slices along the first axis
     pub depth: usize,
+    /// Rows per slice
     pub height: usize,
+    /// Columns per row
     pub width: usize,
+    /// The voxels, `depth * height * width` bytes in C order
     pub data: &'a [u8],
 }
 
@@ -101,11 +109,15 @@ impl<'a> VolumeRef<'a> {
 pub struct LowRes {
     /// The pyramid level read
     pub level: String,
+    /// Rows of the mask
     pub height: usize,
+    /// Columns of the mask
     pub width: usize,
     /// `[height, width]`, row-major: whether any voxel along depth is nonzero
     pub mask: Vec<bool>,
+    /// Level-0 rows per mask row
     pub scale_y: usize,
+    /// Level-0 columns per mask column
     pub scale_x: usize,
 }
 

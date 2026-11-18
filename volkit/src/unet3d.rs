@@ -22,15 +22,20 @@ pub mod zio;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Precision {
+    /// FP16 storage with FP16 tensor-op math
     Fp16,
+    /// BF16 storage with BF16 tensor-op math
     Bf16,
+    /// Float32 storage with TF32 convolution and GEMM math
     Tf32,
 }
 
 /// A 16-bit storage type, whose values the host handles as raw bits
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Half {
+    /// IEEE binary16
     Fp16,
+    /// Brain floating point, 16 bits
     Bf16,
 }
 
@@ -97,20 +102,30 @@ impl Precision {
 /// An InstanceNorm's affine tensors and eps
 #[derive(Clone, Debug, Deserialize)]
 pub struct NormSpec {
+    /// Tensor name of the scale
     pub w: String,
+    /// Tensor name of the shift
     pub b: String,
+    /// Added to the variance for numerical stability
     pub eps: f32,
 }
 
 /// One conv, with the norm and activation that follow it when it is a ConvDropoutNormReLU
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConvSpec {
+    /// Tensor name of the weight
     pub w: String,
+    /// Tensor name of the bias, if the conv has one
     pub b: Option<String>,
+    /// Input channels
     pub cin: usize,
+    /// Output channels
     pub cout: usize,
+    /// Kernel size per axis, `[z, y, x]`
     pub kernel: Vec<usize>,
+    /// Stride per axis, `[z, y, x]`
     pub stride: Vec<usize>,
+    /// The norm that follows the conv, if any
     pub norm: Option<NormSpec>,
     /// LeakyReLU's negative slope, or `None` for no activation
     pub leaky: Option<f32>,
@@ -119,7 +134,9 @@ pub struct ConvSpec {
 /// A BasicBlockD skip: optional average pool (kernel = stride), then optional bias-free 1x1 conv + norm
 #[derive(Clone, Debug, Deserialize)]
 pub struct SkipSpec {
+    /// The average pool applied to the skip path
     pub pool: Pool,
+    /// The 1x1 conv and norm after the pool, if any
     pub proj: Option<ConvSpec>,
 }
 
@@ -128,7 +145,9 @@ pub struct SkipSpec {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Pool {
+    /// The same stride on every axis
     Iso(usize),
+    /// A stride per axis, `[z, y, x]`
     Axes([usize; 3]),
 }
 
@@ -145,29 +164,39 @@ impl Pool {
 /// One BasicBlockD: `leaky(norm(conv2(leaky(norm(conv1(x))))) + skip(x))`
 #[derive(Clone, Debug, Deserialize)]
 pub struct BlockSpec {
+    /// The first conv of the block
     pub conv1: ConvSpec,
+    /// The second conv, whose output the skip is added to
     pub conv2: ConvSpec,
+    /// The skip path
     pub skip: SkipSpec,
+    /// LeakyReLU's negative slope after the add
     pub leaky: f32,
 }
 
 /// One decoder stage: k2 s2 transposed conv, concat `(up, skip)`, then its convs
 #[derive(Clone, Debug, Deserialize)]
 pub struct DecSpec {
+    /// The k2 s2 transposed conv
     pub transp: ConvSpec,
+    /// The convs that follow the concat
     pub convs: Vec<ConvSpec>,
 }
 
 /// The whole layer program
 #[derive(Clone, Debug, Deserialize)]
 pub struct Program {
+    /// The stem's convs
     pub stem: Vec<ConvSpec>,
+    /// The encoder stages, each a list of blocks
     pub stages: Vec<Vec<BlockSpec>>,
+    /// The decoder stages, deepest first
     pub decoder: Vec<DecSpec>,
+    /// The segmentation head, a 1x1 conv
     pub head: ConvSpec,
 }
 
-/// Fails with [`Unsupported`] on a device the engine can't run on: its convs are cuDNN bf16, which
+/// Fails with [`Unsupported`](crate::error::Unsupported) on a device the engine can't run on: its convs are cuDNN bf16, which
 /// needs compute capability 8.0, and an sm75 PTX tier, which volkit does not ship, would lack its kernels
 pub fn check_device(cc: ComputeCapability, tier: PtxTier) -> Result<()> {
     ensure_supported!(

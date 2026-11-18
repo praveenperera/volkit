@@ -1,7 +1,7 @@
 //! The one error a caller can act on: input, a model or a GPU outside what this engine implements, where a caller
 //! such as villa falls back to its own PyTorch path instead of failing. Every other error is a real failure
 //!
-//! Limits fail through [`ensure_supported!`]; [`is_unsupported`] reads a report's chain, including cudakit's and
+//! Limits fail through [`ensure_supported!`](crate::ensure_supported); [`is_unsupported`] reads a report's chain, including cudakit's and
 //! the driver's ways of saying the embedded PTX cannot run on this GPU, so callers never copy the arch list
 
 use std::fmt;

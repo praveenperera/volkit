@@ -68,7 +68,10 @@ pub enum Dtype {
     Half,
     /// FP32 data. `tf32` lets cuDNN round the inputs to TF32 on tensor cores, as PyTorch does
     /// by default (`torch.backends.cudnn.allow_tf32`); without it cuDNN keeps to FP32 FMAs
-    Float { tf32: bool },
+    Float {
+        /// Whether cuDNN may round the inputs to TF32 on tensor cores
+        tf32: bool,
+    },
     /// BF16 data with tensor ops, PyTorch's bf16 autocast
     Bf16,
 }
@@ -113,12 +116,19 @@ pub enum Pick {
 /// or `[H, W]`), kernel size, padding and stride per spatial axis
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConvShape {
+    /// Batch size
     pub n: i32,
+    /// Input channels
     pub c: i32,
+    /// Output channels
     pub k: i32,
+    /// Input spatial size per axis, `[D, H, W]` or `[H, W]`
     pub spatial: Vec<i32>,
+    /// Kernel size per spatial axis
     pub kernel: Vec<i32>,
+    /// Padding per spatial axis
     pub pad: Vec<i32>,
+    /// Stride per spatial axis
     pub stride: Vec<i32>,
 }
 
@@ -181,11 +191,17 @@ impl fmt::Display for ConvShape {
 /// One algorithm's entry in cuDNN's ranking
 #[derive(Clone, Copy, Debug)]
 pub struct AlgoPerf {
+    /// The cuDNN forward algorithm
     pub algo: dnn::cudnnConvolutionFwdAlgo_t,
+    /// cuDNN's status for this algorithm; anything but success means it does not run this shape
     pub status: dnn::cudnnStatus_t,
+    /// Time in milliseconds cuDNN reported for the algorithm; only meaningful for a timed [`Pick::Find`] ranking
     pub ms: f32,
+    /// Scratch memory the algorithm needs, in bytes
     pub workspace: usize,
+    /// The math type the algorithm was ranked under
     pub math: dnn::cudnnMathType_t,
+    /// Whether the algorithm gives the same bits on every run
     pub deterministic: bool,
 }
 
@@ -208,8 +224,11 @@ impl fmt::Display for AlgoPerf {
 
 /// A planned NHWC/NDHWC convolution: descriptors and the chosen algorithm
 pub struct ConvPlan {
+    /// The convolution's shape
     pub shape: ConvShape,
+    /// The plan's data type
     pub dtype: Dtype,
+    /// The chosen algorithm
     pub algo: AlgoPerf,
     /// Every algorithm cuDNN ranked, for the report
     pub ranking: Vec<AlgoPerf>,

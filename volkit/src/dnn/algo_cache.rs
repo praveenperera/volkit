@@ -108,17 +108,36 @@ pub enum DriverSource {
 pub enum Status {
     /// `--algo find` plans load and store entries in `dir`, keyed on the driver release `driver`
     /// read from `source`
-    On { dir: PathBuf, source: DriverSource, driver: String },
+    On {
+        /// The cache directory
+        dir: PathBuf,
+        /// Where the driver release was read from
+        source: DriverSource,
+        /// The driver release the entries are keyed on
+        driver: String,
+    },
     /// [`ENV`] turned the cache off
     Disabled,
     /// No cache directory could be named: no `VOLKIT_CACHE_DIR`, `XDG_CACHE_HOME` or `HOME`
     NoDirectory,
     /// No source named the driver release, so every load times cuDNN afresh; `tried` says why each
     /// source failed
-    NoDriverRelease { tried: Vec<String> },
+    NoDriverRelease {
+        /// Why each source failed, one entry per source
+        tried: Vec<String>,
+    },
     /// Keyed as [`Status::On`], but a write into `dir` failed in this process (`error`, the first
     /// failure), so entries this run timed are not kept and later runs time them again
-    Unwritable { dir: PathBuf, source: DriverSource, driver: String, error: String },
+    Unwritable {
+        /// The cache directory the write failed in
+        dir: PathBuf,
+        /// Where the driver release was read from
+        source: DriverSource,
+        /// The driver release the entries are keyed on
+        driver: String,
+        /// The first write failure in this process
+        error: String,
+    },
 }
 
 /// The cache's state in this process, whether or not this run planned with `--algo find`

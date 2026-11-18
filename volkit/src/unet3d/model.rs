@@ -25,10 +25,15 @@ const MAX_CHUNKS: usize = 4096;
 
 /// What the forward needs from the caller
 pub struct Ctx<'a> {
+    /// The GPU and its stream
     pub gpu: &'a Gpu,
+    /// The cuDNN handle
     pub dnn: &'a Dnn,
+    /// The cuBLAS handle
     pub blas: &'a Blas,
+    /// How convolution algorithms are chosen
     pub pick: Pick,
+    /// Workspace limit per convolution, in bytes
     pub max_workspace: usize,
 }
 
@@ -82,7 +87,9 @@ impl Kernels {
 /// `[K, taps, C]` float32 (rounded at upload, after any channel padding), the bias rounded to the
 /// precision, the norm's float32 affine
 pub struct HostConv {
+    /// Input channels
     pub cin: usize,
+    /// Output channels
     pub cout: usize,
     w: Vec<f32>,
     bias: Option<Vec<f32>>,
@@ -289,13 +296,17 @@ struct Level {
 
 /// Where a tensor sits for a tap: its buffer, dims and channels
 pub struct Tap<'a> {
+    /// The tensor's name, e.g. `stem` or `dec0`
     pub name: String,
+    /// The buffer holding the tensor
     pub buf: &'a Buf,
     /// z, y, x
     pub dims: [usize; 3],
+    /// Channels of the tensor
     pub channels: usize,
     /// Channel stride of the buffer (the concat buffer holds two tensors)
     pub stride: usize,
+    /// Offset of the tensor's first channel within each stride-wide row of the buffer
     pub offset: usize,
 }
 
@@ -303,17 +314,23 @@ pub struct Tap<'a> {
 pub struct Head<'a> {
     /// The last decoder output `[p^3, cin]` in the storage type
     pub x: &'a Buf,
+    /// Input channels
     pub cin: usize,
+    /// Output classes
     pub classes: usize,
+    /// The weight `[classes, cin]`
     pub w: &'a Buf,
+    /// The bias `[classes]`
     pub b: &'a Buf,
 }
 
 /// The network on the GPU, at batch 1
 pub struct Model {
+    /// Patch edge length in voxels; the model runs `patch^3` voxels
     pub patch: usize,
+    /// The precision the network runs in
     pub precision: Precision,
-    /// Channel stride of the input buffer [`Model::input`] (the stem's channels, or [`STEM_PAD`])
+    /// Channel stride of the input buffer [`Model::input`] (the stem's channels, or 8 for a padded stem)
     pub in_c: usize,
     kn: Kernels,
     stem: Vec<Conv>,

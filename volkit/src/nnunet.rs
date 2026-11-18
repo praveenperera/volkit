@@ -27,10 +27,15 @@ pub const FORMAT: &str = "inkrs-nnunet-v1";
 /// stored as float32, one value per uint8 code
 #[derive(Clone, Debug, Deserialize)]
 pub struct CtNorm {
+    /// Centre subtracted after clipping
     pub center: f64,
+    /// Divisor applied after centring
     pub scale: f64,
+    /// Lower clip bound, applied before centring
     pub low: f64,
+    /// Upper clip bound, applied before centring
     pub high: f64,
+    /// The 256-entry lookup table, one float32 bit pattern per uint8 code
     pub table_f32_bits: Vec<u32>,
 }
 
@@ -67,15 +72,20 @@ impl CtNorm {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Normalization {
+    /// CT normalisation through a lookup table, as the other recipes' CTNormalization
     Ct(CtNorm),
     /// Fiber tool: z-score over a whole block, std floored
     BlockZscore {
+        /// Floor on the block's standard deviation
         std_floor: f64,
+        /// Block size per axis, `[z, y, x]` in voxels
         block: [usize; 3],
+        /// Margin around the block, in voxels
         margin: usize,
     },
     /// AFV v2's `normalize_ct`: z-score over each tile, with its unbiased std floored
     TileZscore {
+        /// Floor on the tile's unbiased standard deviation
         std_floor: f64,
     },
 }
@@ -94,18 +104,35 @@ pub struct Tta {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Blend {
     /// villa's `generate_gaussian_map`, stored as the float32 tensor `tensor`
-    GaussianMap { tensor: String, sigma_scale: f64 },
+    GaussianMap {
+        /// Name of the exported float32 tensor holding the map
+        tensor: String,
+        /// The patch size divided by this gives the Gaussian's sigma
+        sigma_scale: f64,
+    },
     /// The fiber tool's separable Gaussian
-    AnalyticGaussian { sigma_scale: f64, floor: f64, axis_f32_bits: Vec<u32> },
+    AnalyticGaussian {
+        /// The patch size divided by this gives the Gaussian's sigma
+        sigma_scale: f64,
+        /// Lowest weight the Gaussian is clamped to
+        floor: f64,
+        /// One axis of the separable Gaussian, as float32 bit patterns
+        axis_f32_bits: Vec<u32>,
+    },
     /// lasagna's `blend_ramp`: per axis 0 on `border` voxels at each end and 1 on the core, with linear edges
     /// `overlap - 2 * border` long inside the core, the tile weight the product of the three axes
-    Ramp { border: usize, overlap: usize },
+    Ramp {
+        /// Voxels at each end of an axis whose weight is 0
+        border: usize,
+        /// Voxels shared by neighbouring tiles
+        overlap: usize,
+    },
 }
 
 /// The output finalisation
 #[derive(Clone, Debug, Deserialize)]
 pub struct Finalize {
-    /// `softmax_u8`: villa's `finalize_outputs` (binary: softmax[1] x 255 truncated, or a logit cutoff)
+    /// `softmax_u8`: villa's `finalize_outputs` (binary: `softmax[1] x 255` truncated, or a logit cutoff)
     pub mode: String,
 }
 
@@ -115,36 +142,66 @@ pub struct Finalize {
 pub enum Recipe {
     /// villa `vesuvius.predict` with `--blend_in_memory` (m7)
     VesuviusPredict {
+        /// The precision the network runs in
         precision: Precision,
+        /// How the input is normalised
         normalization: Normalization,
+        /// Test-time augmentation
         tta: Tta,
+        /// How patch predictions are blended
         blend: Blend,
+        /// How the blended output is finalised
         finalize: Finalize,
+        /// Patch overlap as a fraction of the patch
         overlap: f64,
+        /// Whether patches whose input is constant are skipped
         skip_constant_patches: bool,
     },
     /// villa's fiber spline generator (AFV fiber)
     FiberTool {
+        /// The precision the network runs in
         precision: Precision,
+        /// How the input is normalised
         normalization: Normalization,
+        /// Test-time augmentation
         tta: Tta,
+        /// How patch predictions are blended
         blend: Blend,
+        /// How the blended output is finalised
         finalize: Finalize,
+        /// Patch overlap as a fraction of the patch
         overlap: f64,
     },
     /// hercUNet's `jacobi_refine` (HercUNet v0)
     Hercunet {
+        /// The precision the network runs in
         precision: Precision,
+        /// How the input is normalised
         normalization: Normalization,
+        /// Names of the pipeline's input channels
         inputs: Vec<String>,
+        /// Test-time augmentation
         tta: Tta,
+        /// How patch predictions are blended
         blend: Blend,
+        /// How the blended output is finalised
         finalize: Finalize,
+        /// Patch overlap as a fraction of the patch
         overlap: f64,
+        /// Number of Jacobi refinement passes
         passes: usize,
     },
     /// villa's `lasagna/qualzz_inference.py` (AFV v2), its seg head only
-    AfvV2 { precision: Precision, normalization: Normalization, blend: Blend, finalize: Finalize },
+    AfvV2 {
+        /// The precision the network runs in
+        precision: Precision,
+        /// How the input is normalised
+        normalization: Normalization,
+        /// How tile predictions are blended
+        blend: Blend,
+        /// How the blended output is finalised
+        finalize: Finalize,
+    },
     /// The network only, for a pipeline with no engine (Socratic F0)
     ProgramOnly,
 }
@@ -165,15 +222,23 @@ impl Recipe {
 /// The export's contract
 #[derive(Clone, Debug, Deserialize)]
 pub struct Contract {
+    /// The sidecar's format string, [`FORMAT`]
     pub format: String,
+    /// The exported model's name
     pub name: String,
+    /// Patch edge lengths `[z, y, x]` in voxels
     pub patch_size: [usize; 3],
+    /// Input channels of the network
     pub in_channels: usize,
+    /// Classes the head outputs
     pub num_classes: usize,
+    /// The pipeline the weights run in
     pub recipe: Recipe,
+    /// The layer program
     pub program: Program,
     /// Every exported tensor and its shape
     pub keys: BTreeMap<String, Vec<usize>>,
+    /// Alias names mapped to the exported tensor each stands for
     pub aliases: BTreeMap<String, String>,
     /// Checkpoint tensors the inference graph never reads, with the reason
     pub dropped: BTreeMap<String, String>,

@@ -31,8 +31,11 @@ struct Meta {
 
 /// An open uint8 `[Z, Y, X]` zarr v2 array
 pub struct Array {
+    /// The array's directory
     pub dir: PathBuf,
+    /// The array's `[Z, Y, X]` shape in voxels
     pub shape: [usize; 3],
+    /// The chunk shape `[Z, Y, X]` in voxels
     pub chunks: [usize; 3],
     fill: u8,
     sep: String,
@@ -145,7 +148,9 @@ impl Array {
 /// The uint8 prediction array `0` of a new group, chunk `chunk^3`, raw chunks
 pub struct Writer {
     dir: PathBuf,
+    /// The array's `[Z, Y, X]` shape in voxels
     pub shape: [usize; 3],
+    /// The chunk edge length in voxels
     pub chunk: usize,
 }
 

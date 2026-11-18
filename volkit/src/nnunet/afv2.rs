@@ -79,31 +79,44 @@ impl AfvPrecision {
 pub struct Options {
     /// CUDA device ordinal
     pub device: usize,
+    /// How the engine chooses cuDNN algorithms
     pub pick: Pick,
+    /// The precision the forward runs in
     pub precision: AfvPrecision,
 }
 
 /// What loading the engine took and chose
 #[derive(Clone, Debug, Serialize)]
 pub struct LoadReport {
+    /// The model path or name loaded
     pub model: String,
+    /// The precision the forward runs in
     pub precision: AfvPrecision,
+    /// Tile edge length in voxels
     pub patch: usize,
+    /// Tile border the blend ramp zeroes, in voxels
     pub border: usize,
+    /// Seconds spent loading and planning
     pub load_s: f64,
+    /// A one-line description of each convolution plan
     pub plans: Vec<String>,
     /// The seg head's cuDNN plan (fp32) or kernel (bf16), and the output channels it runs (4, or padded to 8 on
     /// cuDNN)
     pub head_plan: String,
+    /// Output channels the seg head runs
     pub head_channels: usize,
+    /// State of the cuDNN algorithm cache for this load
     pub algo_cache: algo_cache::Status,
     /// The cuDNN this process loaded (`cudnnGetVersion`): inside PyTorch it is PyTorch's own, which can choose
     /// other kernels than the system cuDNN a standalone process loads, and so other output bits
     pub cudnn: usize,
+    /// Whether the stem's input channels are padded because cuDNN refuses a one-channel 3D convolution
     pub stem_padded: bool,
+    /// The PTX tier whose kernels were loaded
     pub ptx_tier: String,
     /// The device's name
     pub gpu: String,
+    /// Floating-point operations per tile
     pub flops_per_tile: u64,
 }
 
@@ -111,18 +124,24 @@ pub struct LoadReport {
 /// vertical then horizontal, or `None` when no tile ran (the reference writes nothing for an all-air column)
 #[derive(Debug)]
 pub struct ColumnOut {
+    /// The column's `[z, y, x]` size in voxels
     pub shape: [usize; 3],
+    /// The semantic output, or `None` when no tile ran
     pub semantic: Option<Vec<u8>>,
+    /// The tracing output, or `None` when no tile ran
     pub tracing: Option<Vec<u8>>,
     /// Voxels no tile weighted (the reference's `voxels_uncovered`)
     pub uncovered: u64,
+    /// Tiles the column ran
     pub tiles: usize,
 }
 
 /// A tile's normalisation: the reference's float32 mean and floored unbiased std
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct TileStats {
+    /// The tile's mean over its codes
     pub mean: f32,
+    /// The tile's unbiased standard deviation, floored
     pub std: f32,
 }
 
@@ -199,6 +218,7 @@ pub struct AfvV2 {
     pick: Pick,
     precision: AfvPrecision,
     recipe: AfvV2Recipe,
+    /// What loading the engine took and chose
     pub load: LoadReport,
 }
 
