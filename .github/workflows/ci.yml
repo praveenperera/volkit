@@ -1,0 +1,98 @@
+# Builds and checks volkit on Linux and Windows x86_64: formatting, the committed PTX against its kernel sources,
+# clippy and the CPU tests, plus a macOS build, where the crate is empty. A GitHub runner has no GPU, so nothing
+# here runs a model; CUDA loads at run time, so no job installs a CUDA toolkit
+
+name: CI
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+# a new push to a pull request supersedes its running checks
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.name }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+          - name: Windows x86_64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # the PTX tiers are embedded byte for byte, so a checkout must not change a line ending; .gitattributes keeps
+      # every file LF, and renormalising must find nothing to change
+      - name: Line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add --renormalize .
+          git diff --cached --exit-code
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      # hashes and file lists only; the PTX itself is built with cuda-oxide and the CUDA toolkit
+      - name: Committed PTX matches the kernel sources
+        if: runner.os == 'Linux'
+        run: scripts/check-ptx.sh
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # the tests that need a GPU or model files skip without them, so only the CPU tests run here
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  # on macOS the crate builds empty, which a consumer gating its dependency to Linux never relies on but a
+  # workspace build of theirs may still compile
+  macos:
+    name: Build (macOS arm64)
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Clippy
+        run: cargo clippy --workspace --lib --locked -- -D warnings
