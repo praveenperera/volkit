@@ -45,7 +45,8 @@ impl Checkpoint {
 
     /// Loads `path` (`.safetensors`) and its `.json` sidecar with no model contract: every tensor
     /// float32 and finite, and the sidecar's `keys` and `aliases` equal to the file's. Returns the
-    /// sidecar for the caller's contract checks
+    /// sidecar for the caller's contract checks. The tensors are copied out of a memory map of the file, which
+    /// must not be truncated or rewritten in place while this runs (replace it by renaming instead)
     pub fn read(path: &Path) -> Result<(Self, serde_json::Value)> {
         // mapped rather than read: the tensors are decoded straight from the page cache, without a
         // 138 MB copy first (about 65 ms of the load)

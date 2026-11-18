@@ -28,6 +28,10 @@ const MAX_DEPTH: usize = 128;
 /// The most values materialised from the pickle's object graph, which shared references could otherwise blow up
 /// exponentially (each level referring to the one below twice)
 const MAX_VALUES: usize = 1 << 21;
+/// The most string and byte data materialised, for the same reason: one large string referred to many times
+/// would otherwise copy out once per reference. Twice the largest pickle, since a payload without sharing holds
+/// at most what its pickle does
+const MAX_VALUE_BYTES: usize = 2 * MAX_PICKLE_BYTES;
 /// The most dimensions a tensor may have
 const MAX_NDIM: usize = 16;
 
@@ -171,6 +175,10 @@ pub struct Pth {
 
 impl Pth {
     /// Maps `path`, reads its zip directory and unpickles `data.pkl` in the restricted machine
+    ///
+    /// The file stays memory-mapped until the `Pth` drops, and the tensors are read from the mapping: truncating
+    /// or rewriting the file in place meanwhile can end the process with `SIGBUS`. Replace a checkpoint by
+    /// renaming a new file over it, which leaves the mapped one intact
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).wrap_err_with(|| format!("opening {}", path.display()))?;
         // SAFETY: the map is read-only and nothing writes through it; another process truncating the file while
@@ -491,7 +499,7 @@ fn unpickle(data: &[u8], storage_len: &dyn Fn(&str) -> Option<usize>) -> Result<
         storages: HashMap::new(),
     };
     let root = machine.run()?;
-    let mut budget = MAX_VALUES;
+    let mut budget = Budget { values: MAX_VALUES, bytes: MAX_VALUE_BYTES };
     machine.value(root, 0, &mut budget)
 }
 
@@ -590,7 +598,11 @@ impl Machine<'_> {
             }
             0x85..=0x87 => {
                 let n = usize::from(op - 0x84);
-                let at = self.stack.len().checked_sub(n).ok_or_else(|| eyre!("stack underflow"))?;
+                // the items must all sit above the latest mark, as pickle's own stack discipline requires
+                let floor = self.marks.last().copied().unwrap_or(0);
+                let at = (self.stack.len().checked_sub(n))
+                    .filter(|&at| at >= floor)
+                    .ok_or_else(|| eyre!("stack underflow"))?;
                 let items = self.stack.split_off(at);
                 self.push(Obj::Tuple(items))?;
             }
@@ -668,8 +680,14 @@ impl Machine<'_> {
                 let state = self.pop()?;
                 let target = self.top()?;
                 let kind = self.kind(target);
+                // `Module.state_dict()` returns an OrderedDict carrying a `_metadata` attribute (each module's
+                // version), which pickles as BUILD with that attribute dict: nothing here reads it
+                if let Obj::Dict(_) = &self.objs[target] {
+                    return Ok(());
+                }
+
                 let Obj::Object(object) = &mut self.objs[target] else {
-                    bail!("BUILD on a {kind}, only inert objects take state")
+                    bail!("BUILD on a {kind}, only inert objects and dicts take state")
                 };
                 ensure!(object.state.is_none(), "BUILD twice on one object");
                 object.state = Some(state);
@@ -729,6 +747,7 @@ impl Machine<'_> {
 
     fn pop_mark(&mut self) -> Result<Vec<Id>> {
         let mark = self.marks.pop().ok_or_else(|| eyre!("no mark"))?;
+        ensure!(mark <= self.stack.len(), "mark past the top of the stack");
         Ok(self.stack.split_off(mark))
     }
 
@@ -956,9 +975,9 @@ impl Machine<'_> {
     }
 
     /// The owned value of object `id`, bounded in depth and total size
-    fn value(&self, id: Id, depth: usize, budget: &mut usize) -> Result<Value> {
+    fn value(&self, id: Id, depth: usize, budget: &mut Budget) -> Result<Value> {
         ensure!(depth < MAX_DEPTH, "payload nested deeper than {MAX_DEPTH} (or cyclic)");
-        *budget = budget.checked_sub(1).ok_or_else(|| eyre!("payload expands past {MAX_VALUES} values"))?;
+        budget.take(self.data_bytes(id))?;
         let mut all = |ids: &[Id]| ids.iter().map(|&i| self.value(i, depth + 1, budget)).collect::<Result<Vec<_>>>();
         Ok(match &self.objs[id] {
             Obj::None => Value::None,
@@ -991,11 +1010,39 @@ impl Machine<'_> {
         })
     }
 
-    fn pairs(&self, pairs: &[(Id, Id)], depth: usize, budget: &mut usize) -> Result<Vec<(Value, Value)>> {
-        let pair = |&(k, v): &(Id, Id), budget: &mut usize| -> Result<(Value, Value)> {
+    /// The string and byte data object `id` copies out on its own, without its children
+    fn data_bytes(&self, id: Id) -> usize {
+        match &self.objs[id] {
+            Obj::BigInt(b) | Obj::Bytes(b) => b.len(),
+            Obj::Str(s) => s.len(),
+            Obj::Global { path, .. } => path.len(),
+            Obj::Storage(s) => s.key.len(),
+            Obj::Tensor(t) => t.storage.len() + t.shape.len() * size_of::<usize>(),
+            _ => 0,
+        }
+    }
+
+    fn pairs(&self, pairs: &[(Id, Id)], depth: usize, budget: &mut Budget) -> Result<Vec<(Value, Value)>> {
+        let pair = |&(k, v): &(Id, Id), budget: &mut Budget| -> Result<(Value, Value)> {
             Ok((self.value(k, depth + 1, budget)?, self.value(v, depth + 1, budget)?))
         };
         pairs.iter().map(|p| pair(p, budget)).collect()
+    }
+}
+
+/// What is left of the limits on materialising the payload
+struct Budget {
+    values: usize,
+    bytes: usize,
+}
+
+impl Budget {
+    /// Spends one value holding `bytes` of string or byte data
+    fn take(&mut self, bytes: usize) -> Result<()> {
+        self.values = self.values.checked_sub(1).ok_or_else(|| eyre!("payload expands past {MAX_VALUES} values"))?;
+        self.bytes = (self.bytes.checked_sub(bytes))
+            .ok_or_else(|| eyre!("payload expands past {MAX_VALUE_BYTES} bytes of strings and bytes"))?;
+        Ok(())
     }
 }
 
@@ -1108,5 +1155,31 @@ mod tests {
 
         bomb.push(b'.');
         assert!(format!("{:?}", unpickle(&bomb, &storage_of(0)).err()).contains("expands past"));
+
+        // one 1 MiB string referred to 256 times stays under the value count but not under the byte limit
+        let mut shared = b"\x80\x02(X\x00\x00\x10\x00".to_vec();
+        shared.extend(std::iter::repeat_n(b'a', 1 << 20));
+        shared.extend(b"q\x00");
+        shared.extend(std::iter::repeat_n(*b"h\x00", 255).flatten());
+        shared.extend(b"l.");
+        assert!(format!("{:?}", unpickle(&shared, &storage_of(0)).err()).contains("bytes of strings"));
+    }
+
+    #[test]
+    fn refuses_a_tuple_reaching_below_its_mark() {
+        // TUPLE2 right after MARK would take the items under the mark, leaving the mark past the stack's top
+        let below = unpickle(b"\x80\x02K\x01K\x02(\x86t.", &storage_of(0));
+        assert!(format!("{:?}", below.err()).contains("stack underflow"));
+    }
+
+    #[test]
+    fn a_state_dict_metadata_attribute_is_dropped() -> Result<()> {
+        // OrderedDict(a=1) with BUILD {"_metadata": {}}, as `Module.state_dict()` pickles
+        let value = unpickle(
+            b"\x80\x02ccollections\nOrderedDict\n)RX\x01\x00\x00\x00aK\x01s}X\t\x00\x00\x00_metadata}sb.",
+            &storage_of(0),
+        )?;
+        assert_eq!(value, Value::Dict(vec![(Value::Str("a".into()), Value::Int(1))]));
+        Ok(())
     }
 }
