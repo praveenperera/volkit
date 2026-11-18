@@ -8,7 +8,7 @@ It currently holds what native AFV fibre model V2 inference needs: the AFV v2 en
 
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
-volkit = { git = "https://github.com/praveenperera/volkit", rev = "<sha>" }
+volkit = "0.1"
 ```
 
 ```rust
@@ -22,7 +22,7 @@ net.add(&tiles, &origins)?; // up to MAX_BATCH 128^3 uint8 tiles at their padded
 let column = net.finish(true)?; // semantic (2, nz, ny, nx) and tracing (2, nz/2, ny/2, nx/2) uint8
 ```
 
-[docs/API.md](docs/API.md) lists the public API and environment variables.
+[docs/API.md](https://github.com/praveenperera/volkit/blob/master/docs/API.md) lists the public API and environment variables.
 
 ## Requirements
 
@@ -38,7 +38,7 @@ let column = net.finish(true)?; // semantic (2, nz, ny, nx) and tracing (2, nz/2
 | `volkit-kernels/` | cuda-oxide kernel sources, on their own pinned toolchain (outside the workspace) |
 | `scripts/` | PTX and cubin build and staleness check, the PTX comparison against inkrs, and the inkrs reference run for GPU checks |
 
-[docs/KERNELS.md](docs/KERNELS.md) covers the kernel tiers, how to rebuild them, and the entry-by-entry check of the PTX against inkrs's.
+[docs/KERNELS.md](https://github.com/praveenperera/volkit/blob/master/docs/KERNELS.md) covers the kernel tiers, how to rebuild them, and the entry-by-entry check of the PTX against inkrs's.
 
 ## Checks
 
@@ -53,4 +53,4 @@ The tests that read model files skip unless `VOLKIT_AFV2_EXPORT` (an `afv-v2` `.
 
 ## Licence
 
-Licensed under either of MIT or Apache-2.0, at your option. [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) covers the ported villa code, the libdevice functions compiled into the PTX, and the cuda-oxide device crate.
+Licensed under either of MIT or Apache-2.0, at your option. [THIRD_PARTY_NOTICES](https://github.com/praveenperera/volkit/blob/master/THIRD_PARTY_NOTICES) covers the ported villa code, the libdevice functions compiled into the PTX, and the cuda-oxide device crate.

@@ -5,9 +5,24 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-publish = false
+documentation = "https://docs.rs/volkit"
 readme = "../README.md"
-description = "Shared native GPU runtime for 3D volume networks: CUDA host layer, cuDNN and cuBLAS layers, PTX kernels"
+description = "Native GPU runtime for 3D volume networks: CUDA host layer, cuDNN and cuBLAS layers, prebuilt PTX kernels"
+keywords = ["cuda", "cudnn", "gpu", "inference", "volume"]
+categories = ["science", "computer-vision"]
+# the prebuilt kernels (PTX tiers, cubins and their build records) ship in the crate; their sources in
+# volkit-kernels build on their own pinned toolchain with a git dependency, so they stay in the repository only.
+# The licence files are symlinks to the repository root's
+include = [
+    "/src/**",
+    "/ptx/**",
+    "/examples/**",
+    "/fixtures/**",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/THIRD_PARTY_NOTICES",
+    "/licenses/**",
+]
 
 [dependencies]
 color-eyre = "0.6"

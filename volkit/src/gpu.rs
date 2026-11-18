@@ -598,7 +598,14 @@ mod tests {
     #[cfg_attr(windows, ignore = "check-ptx.sh is a bash script; the Linux build runs it")]
     fn embedded_ptx_matches_its_sources() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let out = std::process::Command::new("bash").arg(root.join("scripts/check-ptx.sh")).output().unwrap();
+        let script = root.join("scripts/check-ptx.sh");
+        // the packaged crate ships the PTX without its kernel sources or this script
+        if !script.exists() {
+            eprintln!("skipped: no {} outside the repository", script.display());
+            return;
+        }
+
+        let out = std::process::Command::new("bash").arg(script).output().unwrap();
         assert!(
             out.status.success(),
             "{}{}",
