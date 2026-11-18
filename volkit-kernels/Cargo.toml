@@ -1,0 +1,19 @@
+[package]
+name = "volkit-kernels"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "cuda-oxide device kernels for volkit, compiled offline to the PTX the volkit crate embeds"
+
+# standalone: cuda-oxide needs its pinned toolchain with rustc-dev, so this crate stays out of the
+# host workspace and only scripts/build-ptx.sh builds it
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# cuda-oxide from NVIDIA/cuda-rust main at 8d8254869, the commit inkrs's kernels build with; Cargo.lock
+# pins the same commit and scripts/build-ptx.sh installs the cargo-oxide of that commit
+cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git", rev = "8d825486993f806903d8968232214ddafa8ed7da" }

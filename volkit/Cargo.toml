@@ -1,0 +1,41 @@
+[package]
+name = "volkit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+readme = "../README.md"
+description = "Shared native GPU runtime for 3D volume networks: CUDA host layer, cuDNN and cuBLAS layers, PTX kernels"
+
+[dependencies]
+color-eyre = "0.6"
+half = { version = "2", features = ["bytemuck"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+memmap2 = "0.9"
+rayon = "1"
+safetensors = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zstd = "0.13"
+
+# the CUDA backend: every platform but macOS, where the crate builds empty
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# driver-only host stack; cuDNN and cuBLAS load at run time after its symbol preflight. The versions and features
+# inkrs 0.4.0 locks, so the numerics and algorithm choices are inkrs's: 0.1 re-exports cudarc's own types
+cudakit = { version = "0.1", features = ["libraries"] }
+# NVML for the algorithm cache's driver-release key where /proc hides it (dnn/algo_cache.rs), and on Windows the
+# pinned CUDA libraries (src/dll.rs); the version cudarc already brings into the tree
+libloading = "0.9"
+# the same cudarc as cudakit 0.1 (0.19.10, one copy in Cargo.lock), for raw cuDNN and cuBLAS calls on handles of
+# our own
+cudarc = { version = "0.19.10", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12040", "cublas", "cudnn"] }
+
+# Windows only: takes the current directory and PATH out of the CUDA libraries' DLL search (src/dll.rs)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
+
+[[example]]
+name = "afv2_smoke"

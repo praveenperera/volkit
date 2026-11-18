@@ -1,0 +1,5 @@
+__nv_expf
+__nv_fmaxf
+__nv_fminf
+__nv_rintf
+__nv_sqrtf

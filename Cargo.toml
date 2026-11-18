@@ -1,0 +1,14 @@
+# the kernel crate builds only through scripts/build-ptx.sh on its own pinned toolchain
+[workspace]
+resolver = "3"
+members = ["volkit"]
+exclude = ["volkit-kernels"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Praveen Perera"]
+repository = "https://github.com/praveenperera/volkit"
+
+[profile.release]
+debug = 1

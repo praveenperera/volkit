@@ -1,0 +1,141 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'u3h_upk' for 'sm_80'
+ptxas info    : Function properties for u3h_upk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 436 bytes cmem[0]
+ptxas info    : Compile time = 5.208 ms
+ptxas info    : Compiling entry function 'u3h_up' for 'sm_80'
+ptxas info    : Function properties for u3h_up
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 2.922 ms
+ptxas info    : Compiling entry function 'u3h_poolk' for 'sm_80'
+ptxas info    : Function properties for u3h_poolk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 412 bytes cmem[0]
+ptxas info    : Compile time = 5.663 ms
+ptxas info    : Compiling entry function 'u3h_pool2' for 'sm_80'
+ptxas info    : Function properties for u3h_pool2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 3.627 ms
+ptxas info    : Compiling entry function 'u3h_partial' for 'sm_80'
+ptxas info    : Function properties for u3h_partial
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 6144 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 6.621 ms
+ptxas info    : Compiling entry function 'u3h_apply_pool' for 'sm_80'
+ptxas info    : Function properties for u3h_apply_pool
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 43 registers, used 0 barriers, 600 bytes cmem[0]
+ptxas info    : Compile time = 5.935 ms
+ptxas info    : Compiling entry function 'u3h_apply' for 'sm_80'
+ptxas info    : Function properties for u3h_apply
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 0 barriers, 576 bytes cmem[0]
+ptxas info    : Compile time = 3.755 ms
+ptxas info    : Compiling entry function 'u3f_upk' for 'sm_80'
+ptxas info    : Function properties for u3f_upk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 436 bytes cmem[0]
+ptxas info    : Compile time = 3.115 ms
+ptxas info    : Compiling entry function 'u3f_up' for 'sm_80'
+ptxas info    : Function properties for u3f_up
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 2.209 ms
+ptxas info    : Compiling entry function 'u3f_poolk' for 'sm_80'
+ptxas info    : Function properties for u3f_poolk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 412 bytes cmem[0]
+ptxas info    : Compile time = 4.067 ms
+ptxas info    : Compiling entry function 'u3f_pool2' for 'sm_80'
+ptxas info    : Function properties for u3f_pool2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.697 ms
+ptxas info    : Compiling entry function 'u3f_partial' for 'sm_80'
+ptxas info    : Function properties for u3f_partial
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 6144 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 6.354 ms
+ptxas info    : Compiling entry function 'u3f_apply_pool' for 'sm_80'
+ptxas info    : Function properties for u3f_apply_pool
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 55 registers, used 0 barriers, 600 bytes cmem[0]
+ptxas info    : Compile time = 7.224 ms
+ptxas info    : Compiling entry function 'u3f_apply' for 'sm_80'
+ptxas info    : Function properties for u3f_apply
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 0 barriers, 576 bytes cmem[0]
+ptxas info    : Compile time = 3.342 ms
+ptxas info    : Compiling entry function 'u3_upk' for 'sm_80'
+ptxas info    : Function properties for u3_upk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 436 bytes cmem[0]
+ptxas info    : Compile time = 3.329 ms
+ptxas info    : Compiling entry function 'u3_up' for 'sm_80'
+ptxas info    : Function properties for u3_up
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 14 registers, used 0 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 2.398 ms
+ptxas info    : Compiling entry function 'u3_poolk' for 'sm_80'
+ptxas info    : Function properties for u3_poolk
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 412 bytes cmem[0]
+ptxas info    : Compile time = 4.267 ms
+ptxas info    : Compiling entry function 'u3_pool2' for 'sm_80'
+ptxas info    : Function properties for u3_pool2
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 23 registers, used 0 barriers, 400 bytes cmem[0]
+ptxas info    : Compile time = 2.869 ms
+ptxas info    : Compiling entry function 'u3_partial' for 'sm_80'
+ptxas info    : Function properties for u3_partial
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 6144 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 6.662 ms
+ptxas info    : Compiling entry function 'u3_finalize' for 'sm_80'
+ptxas info    : Function properties for u3_finalize
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 1 barriers, 3072 bytes smem, 404 bytes cmem[0]
+ptxas info    : Compile time = 11.535 ms
+ptxas info    : Compiling entry function 'u3_apply_pool' for 'sm_80'
+ptxas info    : Function properties for u3_apply_pool
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 46 registers, used 0 barriers, 600 bytes cmem[0]
+ptxas info    : Compile time = 6.739 ms
+ptxas info    : Compiling entry function 'u3_apply' for 'sm_80'
+ptxas info    : Function properties for u3_apply
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers, 576 bytes cmem[0]
+ptxas info    : Compile time = 4.398 ms
+ptxas info    : Compiling entry function 'nn_prep' for 'sm_80'
+ptxas info    : Function properties for nn_prep
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 456 bytes cmem[0]
+ptxas info    : Compile time = 1.882 ms
+ptxas info    : Compiling entry function 'nf_head' for 'sm_80'
+ptxas info    : Function properties for nf_head
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 452 bytes cmem[0]
+ptxas info    : Compile time = 3.461 ms
+ptxas info    : Compiling entry function 'af_prep' for 'sm_80'
+ptxas info    : Function properties for af_prep
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 0 barriers, 408 bytes cmem[0]
+ptxas info    : Compile time = 0.737 ms
+ptxas info    : Compiling entry function 'af_pool' for 'sm_80'
+ptxas info    : Function properties for af_pool
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 412 bytes cmem[0]
+ptxas info    : Compile time = 2.841 ms
+ptxas info    : Compiling entry function 'af_fold' for 'sm_80'
+ptxas info    : Function properties for af_fold
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 27 registers, used 0 barriers, 488 bytes cmem[0]
+ptxas info    : Compile time = 6.099 ms
+ptxas info    : Compiling entry function 'af_finish' for 'sm_80'
+ptxas info    : Function properties for af_finish
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 21 registers, used 1 barriers, 4 bytes smem, 416 bytes cmem[0]
+ptxas info    : Compile time = 4.392 ms

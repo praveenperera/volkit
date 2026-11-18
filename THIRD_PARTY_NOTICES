@@ -1,0 +1,61 @@
+Third-party notices for volkit
+
+volkit's own licence does not cover the material below. Each entry names the upstream work, says which
+files here carry or port it, and reproduces its licence.
+
+========================================================================================================
+1. villa, Vesuvius Challenge (MIT), commit 7e6b82164
+   https://github.com/ScrollPrize/villa
+
+   Covers: the Rust port of villa's AFV v2 inference, carried over from inkrs:
+   - volkit/src/nnunet/afv2.rs, volkit-kernels/src/afv2.rs: lasagna/qualzz_inference.py's per-tile
+     normalisation, seg head, softmax, ramp blend and uint8 finish
+   - volkit/src/unet3d/model.rs, volkit-kernels/src/unet3d.rs: the ResEnc U-Net forward villa's nnU-Net
+     models run, under PyTorch's float32, bf16 and fp16 semantics
+   - volkit/src/zarr.rs, volkit/src/unet3d/zio.rs: the zarr arrays villa reads and writes
+
+MIT License
+
+Copyright (c) 2024 Vesuvius Challenge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+========================================================================================================
+2. NVIDIA libdevice (CUDA Toolkit 13.2, NVIDIA CUDA Toolkit End User License Agreement)
+
+   Covers: volkit/ptx/volkit.sm80.ptx and volkit/ptx/volkit.sm120.ptx, and the cubins scripts/build-cubin.sh
+   compiles from them (volkit/ptx/volkit.sm80.*.cubin and volkit/ptx/volkit.sm120.*.cubin).
+   scripts/build-ptx.sh links libdevice.10.bc (its SHA-256 is in volkit/ptx/tools.txt) into the kernels of
+   both, so the PTX and cubins contain compiled code from libdevice's __nv_expf, __nv_sqrtf, __nv_fmaxf,
+   __nv_fminf and __nv_rintf.
+   libdevice is listed as distributable in Attachment A of the CUDA EULA, and that code is
+   distributed under the EULA's terms, not under volkit's licence. The EULA is at
+   https://docs.nvidia.com/cuda/eula/ and in each CUDA Toolkit as EULA.txt.
+
+========================================================================================================
+3. cuda-oxide device crate, NVIDIA (Apache License 2.0), from github.com/NVIDIA/cuda-rust at
+   8d825486993f806903d8968232214ddafa8ed7da
+
+   Covers: volkit/ptx/volkit.sm80.ptx and volkit/ptx/volkit.sm120.ptx, and the cubins compiled from them.
+   The kernels in volkit-kernels/ call the cuda-device crate's intrinsics and conversions, which are compiled into
+   the PTX. The crate itself is a build dependency and is not included here. Its licence, with
+   NVIDIA's copyright line, is in licenses/cuda-rust-LICENSE.
+
+   Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+   Licensed under the Apache License, Version 2.0 (licenses/cuda-rust-LICENSE).
