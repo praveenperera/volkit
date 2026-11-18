@@ -58,48 +58,8 @@ fn cubin_for(tier: PtxTier, capability: ComputeCapability) -> Option<&'static Cu
         .max_by_key(|c| c.arch.minor)
 }
 
-/// How the loaded kernels reached the GPU
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kernels {
-    /// A cubin compiled ahead for this family
-    Sass(ComputeCapability),
-    /// The tier's PTX, compiled by the driver's JIT
-    Ptx,
-}
-
-impl std::fmt::Display for Kernels {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Kernels::Sass(arch) => write!(f, "sm_{}{} SASS", arch.major, arch.minor),
-            Kernels::Ptx => f.write_str("PTX, JIT-compiled"),
-        }
-    }
-}
-
 /// Forces a PTX tier at or below the device's, such as `sm80` to run the RTX 30 kernels on an RTX 50
 pub const TIER_ENV: &str = "VOLKIT_PTX_TIER";
-
-/// Each embedded PTX tier's `.target` and `.version` (PTX ISA) lines, lowest tier first, for build
-/// reports and the minimum-driver figures of the Python package
-pub fn ptx_targets() -> Vec<(String, String)> {
-    PTX.iter().map(|(_, ptx)| (ptx_directive(ptx, ".target "), ptx_directive(ptx, ".version "))).collect()
-}
-
-/// Each embedded cubin as `(PTX target it was compiled from, GPU family it runs on)`, such as
-/// `("sm_80", "sm_86")`, in [`CUBINS`] order, for build reports
-pub fn cubin_targets() -> Vec<(String, String)> {
-    CUBINS
-        .iter()
-        .map(|c| {
-            let ptx = PTX.iter().find(|(tier, _)| *tier == c.tier).map(|(_, ptx)| *ptx).unwrap_or_default();
-            (ptx_directive(ptx, ".target "), format!("sm_{}{}", c.arch.major, c.arch.minor))
-        })
-        .collect()
-}
-
-fn ptx_directive(ptx: &str, name: &str) -> String {
-    ptx.lines().find_map(|l| l.trim().strip_prefix(name).map(|v| v.trim().to_owned())).unwrap_or_default()
-}
 
 /// cuDNN entry points the conv plans call directly, beyond cudakit's own list
 const CUDNN_SYMBOLS: &[&std::ffi::CStr] = &[
@@ -202,52 +162,20 @@ impl Drop for Buf {
     }
 }
 
-/// Page-locked host memory, so async device-to-host copies are truly async and the
-/// buffer outlives them by construction (the owner synchronizes before reading or dropping)
-#[derive(Debug)]
-pub struct Pinned {
-    ptr: *mut u8,
-    bytes: usize,
-}
-
-// SAFETY: plain host memory; access is coordinated by stream synchronization
-unsafe impl Send for Pinned {}
-
-impl Pinned {
-    /// The contents; only valid once the copies into it have completed
-    pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: `bytes` were allocated at `ptr`
-        unsafe { std::slice::from_raw_parts(self.ptr, self.bytes) }
-    }
-}
-
-impl Drop for Pinned {
-    fn drop(&mut self) {
-        // SAFETY: allocated by `cuMemHostAlloc` and no copy into it is pending
-        let _ = unsafe { cur::free_host(self.ptr.cast()) };
-    }
-}
-
 /// The GPU, its stream and the loaded volkit kernels
 pub struct Gpu {
     // the module and handles must drop before the cudakit GPU's context
     functions: RefCell<HashMap<&'static str, (cu::CUfunction, Vec<Param>)>>,
     module: Arc<CudaModule>,
     ptx: &'static str,
-    kernels: Kernels,
     /// The underlying cudakit GPU, which owns the context and stream
     pub inner: cudakit::Gpu,
 }
 
 impl Gpu {
-    /// Opens device 0, prepares cuDNN and cuBLAS and loads the kernels of the highest shipped tier
+    /// Opens device `ordinal`, prepares cuDNN and cuBLAS and loads the kernels of the highest shipped tier
     /// the device runs, or of the tier `VOLKIT_PTX_TIER` names: the tier's cubin for the device's
     /// family when there is one, else its PTX
-    pub fn open() -> Result<Self> {
-        Self::open_device(0)
-    }
-
-    /// [`Gpu::open`] on device `ordinal`
     pub fn open_device(ordinal: usize) -> Result<Self> {
         let requested = match std::env::var(TIER_ENV) {
             Ok(value) if !value.is_empty() => {
@@ -265,16 +193,16 @@ impl Gpu {
         inner.prepare(Library::Cublas).wrap_err("prepare cuBLAS")?;
         let tier = inner.ptx_tier();
         let ptx = ptx_for(tier)?;
-        let (module, kernels) = Self::load_kernels(&inner, tier, ptx)?;
-        Ok(Self { functions: RefCell::new(HashMap::new()), module, ptx, kernels, inner })
+        let module = Self::load_kernels(&inner, tier, ptx)?;
+        Ok(Self { functions: RefCell::new(HashMap::new()), module, ptx, inner })
     }
 
     /// Loads `tier`'s cubin for the device, or its PTX when there is none or the driver refuses the
     /// cubin, as a driver older than the ptxas that built it may
-    fn load_kernels(inner: &cudakit::Gpu, tier: PtxTier, ptx: &str) -> Result<(Arc<CudaModule>, Kernels)> {
+    fn load_kernels(inner: &cudakit::Gpu, tier: PtxTier, ptx: &str) -> Result<Arc<CudaModule>> {
         if let Some(cubin) = cubin_for(tier, inner.compute_capability()) {
             match inner.context().load_module(Ptx::from_binary(cubin.bytes.to_vec())) {
-                Ok(module) => return Ok((module, Kernels::Sass(cubin.arch))),
+                Ok(module) => return Ok(module),
                 // the PTX still runs, only the first run is slower, so this warns rather than fails
                 Err(e) => eprintln!("volkit: the driver refused the {tier} cubin ({e}); JIT-compiling the PTX"),
             }
@@ -282,12 +210,7 @@ impl Gpu {
 
         let module =
             inner.context().load_module(Ptx::from_src(ptx)).wrap_err_with(|| format!("load the volkit {tier} PTX"))?;
-        Ok((module, Kernels::Ptx))
-    }
-
-    /// How the kernels were loaded: a cubin compiled ahead, or the PTX through the driver's JIT
-    pub fn kernels(&self) -> Kernels {
-        self.kernels
+        Ok(module)
     }
 
     /// The raw stream
@@ -364,29 +287,6 @@ impl Gpu {
             cur::stream::synchronize(self.cu_stream())?;
         }
         Ok(out)
-    }
-
-    /// Allocates `bytes` of pinned host memory
-    pub fn pinned(&self, bytes: usize) -> Result<Pinned> {
-        self.inner.context().bind_to_thread()?;
-        // SAFETY: a plain allocation
-        let ptr = unsafe { cur::malloc_host(bytes.max(1), 0) }?;
-        Ok(Pinned { ptr: ptr.cast(), bytes })
-    }
-
-    /// Queues a copy of `bytes` from `src` at byte `offset` into `dst`
-    ///
-    /// # Safety
-    ///
-    /// `dst` must not be read or dropped until the stream has passed this copy
-    pub unsafe fn download_async(&self, dst: &mut Pinned, src: &Buf, offset: usize, bytes: usize) -> Result<()> {
-        ensure!(bytes <= dst.bytes && offset + bytes <= src.bytes, "async download out of bounds");
-        // SAFETY: bounds checked; the caller keeps `dst` alive past the copy
-        unsafe {
-            let dst = std::slice::from_raw_parts_mut(dst.ptr, bytes);
-            cur::memcpy_dtoh_async(dst, src.ptr + offset as u64, self.cu_stream())?;
-        }
-        Ok(())
     }
 
     /// Waits for every queued operation

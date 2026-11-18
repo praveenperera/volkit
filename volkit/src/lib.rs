@@ -1,11 +1,11 @@
 //! volkit: the shared native GPU runtime for 3D volume networks
 //!
-//! The CUDA host layer over cudakit ([`gpu`]), channels-last cuDNN convolutions and cuBLAS GEMMs ([`dnn`]), the
-//! 3D ResEnc U-Net forward built from an export's layer program ([`unet3d`]), safetensors weights ([`weights`]),
-//! zarr IO ([`zarr`], [`unet3d::zio`]) and the nnU-Net contract with AFV v2's seg inference ([`nnunet`]), whose
-//! weights can also come straight from an nnU-Net model folder without torch ([`nnunet::export`], over the
-//! restricted `checkpoint_final.pth` reader [`pth`]). The kernels are cuda-oxide PTX built from `volkit-kernels` and
-//! embedded at compile time
+//! It runs AFV v2's seg inference natively ([`nnunet::afv2`]): the 3D ResEnc U-Net forward over channels-last
+//! cuDNN convolutions and cuBLAS GEMMs, built from an export's layer program ([`unet3d`]) and its safetensors
+//! weights ([`weights`]), or straight from an nnU-Net model folder without torch ([`nnunet::export`], over the
+//! restricted `checkpoint_final.pth` reader [`pth`]). [`dnn`] sets how cuDNN picks its algorithms and caches the
+//! choice. The kernels are cuda-oxide PTX built from `volkit-kernels` and embedded at compile time; the device
+//! layer under them stays private
 //!
 //! The code came from inkrs 0.4.0's AFV v2 path with the same numerics: the same cudakit and cudarc, the same cuDNN
 //! and cuBLAS calls and algorithm choice, and PTX whose kernels match inkrs's entry for entry. It builds on Linux
@@ -18,10 +18,9 @@
 pub mod dll;
 pub mod dnn;
 pub mod error;
-pub mod gpu;
+pub(crate) mod gpu;
 pub mod nnunet;
 pub mod paths;
 pub mod pth;
 pub mod unet3d;
 pub mod weights;
-pub mod zarr;

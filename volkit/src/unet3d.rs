@@ -2,10 +2,10 @@
 //!
 //! An export's sidecar holds the network's layer program: the stem, the BasicBlockD encoder stages, the
 //! transposed-conv and ConvBlock decoder stages and the 1x1 head, each conv with its tensor names, channels,
-//! kernel and stride. [`model::Model`] builds the network from that program, so any checkpoint inside the op set
+//! kernel and stride. The crate's forward builds the network from that program, so any checkpoint inside the op set
 //! the export accepts runs without code changes. The forward is channels-last at batch 1 in bf16, fp16 or float32
 //! ([`Precision`]): cuDNN runs the convs, cuBLAS the transposed convs as GEMMs, and the `u3*_` kernels the
-//! InstanceNorm, LeakyReLU, residuals, pooling and concat. [`zio`] reads and writes the zarr arrays around it
+//! InstanceNorm, LeakyReLU, residuals, pooling and concat
 
 use color_eyre::eyre::Result;
 use cudakit::{ComputeCapability, PtxTier};
@@ -13,8 +13,7 @@ use serde::Deserialize;
 
 use crate::ensure_supported;
 
-pub mod model;
-pub mod zio;
+pub(crate) mod model;
 
 /// The precision the network runs in: the activations' storage type, the weights' rounding, the cuDNN and
 /// cuBLAS data type and the glue kernels (`u3_*` for bf16 and `u3h_*` for fp16, as autocast runs them; `u3f_*`
@@ -198,7 +197,7 @@ pub struct Program {
 
 /// Fails with [`Unsupported`](crate::error::Unsupported) on a device the engine can't run on: its convs are cuDNN bf16, which
 /// needs compute capability 8.0, and an sm75 PTX tier, which volkit does not ship, would lack its kernels
-pub fn check_device(cc: ComputeCapability, tier: PtxTier) -> Result<()> {
+pub(crate) fn check_device(cc: ComputeCapability, tier: PtxTier) -> Result<()> {
     ensure_supported!(
         cc >= ComputeCapability::new(8, 0) && tier != PtxTier::Sm75,
         "the 3D U-Net engines (ink3d, nnunet, fiber, afv-v2) need a GPU of compute capability 8.0 or above and the \
@@ -349,7 +348,7 @@ impl Program {
         Ok(levels)
     }
 
-    /// The layers [`model::Model`] runs: cubic kernels, isotropic strides and pools, k2 s2 transposed convs
+    /// The layers the forward runs: cubic kernels, isotropic strides and pools, k2 s2 transposed convs
     pub fn check_isotropic(&self) -> Result<()> {
         let convs = self
             .stem
@@ -377,7 +376,7 @@ impl Program {
         Ok(())
     }
 
-    /// The layers [`model::Model`] runs: cubic kernels, a stride of 1 or 2 on each axis (AFV's last stage
+    /// The layers the forward runs: cubic kernels, a stride of 1 or 2 on each axis (AFV's last stage
     /// strides (2, 2, 1)), skip pools equal to their stride, and transposed convs whose kernel equals their
     /// stride on each axis. [`Program::check_isotropic`] is the narrower contract v0.2's models and m7 keep
     pub fn check_axes(&self) -> Result<()> {

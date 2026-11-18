@@ -1,6 +1,6 @@
 # volkit
 
-Shared native GPU runtime for 3D volume networks: the CUDA host layer over cudakit, cuDNN and cuBLAS layers, PTX kernels, tiling and blending, zarr IO, and the networks inkrs and fibrs run on it.
+Shared native GPU runtime for 3D volume networks: the CUDA host layer over cudakit, cuDNN and cuBLAS layers, PTX kernels, blending, and the networks inkrs and fibrs run on it.
 
 It currently holds what native AFV fibre model V2 inference needs: the AFV v2 engine (`volkit::nnunet::afv2::AfvV2`), the 3D ResEnc U-Net forward it runs, and a reader for nnU-Net `checkpoint_final.pth` files that needs no torch or Python. The code and kernels came from [inkrs](https://github.com/praveenperera/inkrs) 0.4.0's AFV v2 path and compute the same output.
 
@@ -39,7 +39,7 @@ To keep the 12.x libraries, keep CUDA 13 library directories off `LD_LIBRARY_PAT
 
 | Path | What |
 | --- | --- |
-| `volkit/` | The crate: `gpu` (device, buffers, checked kernel launches), `dnn` (cuDNN conv plans, cuBLAS GEMMs, the on-disk algorithm cache), `unet3d` (layer program and forward), `nnunet` (export contract, AFV v2 engine, torch-free export), `weights`, `zarr` |
+| `volkit/` | The crate: `nnunet` (export contract, AFV v2 engine, torch-free export), `pth` (the checkpoint reader), `weights`, `unet3d` (layer program), `dnn` (cuDNN algorithm choice and its on-disk cache), and the private device layer (buffers, checked kernel launches, cuDNN conv plans, cuBLAS GEMMs) |
 | `volkit/ptx/` | The embedded PTX tiers and cubins, built from `volkit-kernels` |
 | `volkit-kernels/` | cuda-oxide kernel sources, on their own pinned toolchain (outside the workspace) |
 | `scripts/` | PTX and cubin build and staleness check, the PTX comparison against inkrs, and the inkrs reference run for GPU checks |

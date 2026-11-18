@@ -3,7 +3,7 @@
 //!
 //! cudakit's `dnn` is FP32 NCHW 2D only, so this crate drives the legacy cuDNN API through
 //! cudarc's raw bindings on its own handles. The villa readers run FP16 with tensor ops; Hecate
-//! runs FP32 (TF32 or not) or BF16, as its reference does ([`Dtype`]). No plan carries a bias:
+//! runs FP32 (TF32 or not) or BF16, as its reference does (`Dtype`). No plan carries a bias:
 //! the villa convs feed an InstanceNorm, which cancels it, and Hecate's backbone and decoder
 //! convs have none
 
@@ -19,7 +19,7 @@ use cudarc::cudnn::sys as dnn;
 use crate::gpu::{Buf, Gpu};
 
 pub mod algo_cache;
-pub mod gemm_bf16;
+pub(crate) mod gemm_bf16;
 
 fn check(status: dnn::cudnnStatus_t, what: &str) -> Result<()> {
     if status == dnn::cudnnStatus_t::CUDNN_STATUS_SUCCESS {
@@ -34,7 +34,7 @@ fn check(status: dnn::cudnnStatus_t, what: &str) -> Result<()> {
 ///
 /// cudakit keeps its handle private to its FP32 wrappers, so the FP16 plans make another
 /// after cudakit's symbol preflight has loaded the library
-pub struct Dnn(dnn::cudnnHandle_t);
+pub(crate) struct Dnn(dnn::cudnnHandle_t);
 
 impl Dnn {
     /// A handle bound to `gpu`'s stream
@@ -63,7 +63,7 @@ impl Drop for Dnn {
 
 /// A plan's data type: storage of x, w and y, and the math cuDNN may use. Accumulation is FP32
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Dtype {
+pub(crate) enum Dtype {
     /// FP16 data with tensor ops, the villa readers
     Half,
     /// FP32 data. `tf32` lets cuDNN round the inputs to TF32 on tensor cores, as PyTorch does
@@ -115,7 +115,7 @@ pub enum Pick {
 /// A convolution shape: batch, input and output channels, input spatial size (`[D, H, W]`
 /// or `[H, W]`), kernel size, padding and stride per spatial axis
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConvShape {
+pub(crate) struct ConvShape {
     /// Batch size
     pub n: i32,
     /// Input channels
@@ -190,7 +190,7 @@ impl fmt::Display for ConvShape {
 
 /// One algorithm's entry in cuDNN's ranking
 #[derive(Clone, Copy, Debug)]
-pub struct AlgoPerf {
+pub(crate) struct AlgoPerf {
     /// The cuDNN forward algorithm
     pub algo: dnn::cudnnConvolutionFwdAlgo_t,
     /// cuDNN's status for this algorithm; anything but success means it does not run this shape
@@ -223,7 +223,7 @@ impl fmt::Display for AlgoPerf {
 }
 
 /// A planned NHWC/NDHWC convolution: descriptors and the chosen algorithm
-pub struct ConvPlan {
+pub(crate) struct ConvPlan {
     /// The convolution's shape
     pub shape: ConvShape,
     /// The plan's data type
@@ -253,13 +253,8 @@ impl Drop for ConvPlan {
 }
 
 impl ConvPlan {
-    /// Describes the FP16 `shape` and picks its algorithm. [`Pick::Find`] runs every candidate
-    /// on zero-filled scratch buffers, so call it only while planning
-    pub fn new(gpu: &Gpu, handle: &Dnn, shape: ConvShape, pick: Pick, max_workspace: usize) -> Result<Self> {
-        Self::typed(gpu, handle, shape, Dtype::Half, pick, max_workspace)
-    }
-
-    /// [`ConvPlan::new`] for any [`Dtype`]
+    /// Describes `shape` in `dtype` and picks its algorithm. [`Pick::Find`] runs every candidate on zero-filled
+    /// scratch buffers, so call it only while planning
     pub fn typed(
         gpu: &Gpu,
         handle: &Dnn,
@@ -571,7 +566,7 @@ fn to_perf(p: &dnn::cudnnConvolutionFwdAlgoPerf_t) -> AlgoPerf {
 }
 
 /// Our own cuBLAS handle on the GPU's stream, for FP16 GEMMs with FP32 accumulation
-pub struct Blas(blas::cublasHandle_t);
+pub(crate) struct Blas(blas::cublasHandle_t);
 
 impl Blas {
     /// A handle bound to `gpu`'s stream

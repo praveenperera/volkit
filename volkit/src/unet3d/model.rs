@@ -7,7 +7,6 @@
 //! buffer (`cat`, `[up, skip]`). The last block of each encoder stage writes its output twice, packed
 //! for the next stage and into the second half of that level's `cat`, so the concat costs no copy
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -290,24 +289,6 @@ struct Level {
     pa: Option<Buf>,
     rs: Option<Buf>,
     cat: Option<Buf>,
-    /// Channels of the encoder output at this level
-    c: usize,
-}
-
-/// Where a tensor sits for a tap: its buffer, dims and channels
-pub struct Tap<'a> {
-    /// The tensor's name, e.g. `stem` or `dec0`
-    pub name: String,
-    /// The buffer holding the tensor
-    pub buf: &'a Buf,
-    /// z, y, x
-    pub dims: [usize; 3],
-    /// Channels of the tensor
-    pub channels: usize,
-    /// Channel stride of the buffer (the concat buffer holds two tensors)
-    pub stride: usize,
-    /// Offset of the tensor's first channel within each stride-wide row of the buffer
-    pub offset: usize,
 }
 
 /// The head: weight `[classes, cin]` and bias, rounded to the precision, as float32
@@ -338,7 +319,6 @@ pub struct Model {
     decs: Vec<Dec>,
     head_w: Buf,
     head_b: Buf,
-    head_b0: f32,
     head_c: usize,
     head_classes: usize,
     levels: Vec<Level>,
@@ -351,10 +331,6 @@ pub struct Model {
     /// stage ends in `y` after an odd number of convs and in `x` after an even one, so the head
     /// must read the buffer the forward wrote rather than assume one
     out: (usize, char),
-    tap_names: Vec<(String, usize, char)>,
-    /// When set, every InstanceNorm's `[mean, invstd]` in call order, downloaded as computed (`p0-ink3d`
-    /// runs the forward twice and requires the two traces to be byte-identical)
-    stats_trace: RefCell<Option<Vec<Vec<[f32; 2]>>>>,
 }
 
 impl Model {
@@ -489,7 +465,6 @@ impl Model {
                 pa: if need_pa[l] > 0 { Some(alloc(vox * need_pa[l])?) } else { None },
                 rs: if need_rs[l] { Some(alloc(n)?) } else { None },
                 cat,
-                c: enc_c[l],
             });
         }
         // the decoder's GEMM output lives in `h` of the level it writes
@@ -501,10 +476,6 @@ impl Model {
         let ws_bytes = planner.plans.values().map(|p| p.workspace()).max().unwrap_or(0);
         let input = gpu.alloc_fill(p.pow(3) * in_c * precision.size(), 0)?;
         let stats = [gpu.alloc(max_c * 8)?, gpu.alloc(max_c * 8)?, gpu.alloc(max_c * 8)?];
-        let mut tap_names = vec![("input".to_string(), 0, 'i')];
-        if !stem.is_empty() {
-            tap_names.push(("stem".into(), 0, 's'));
-        }
         Ok(Self {
             patch: p,
             precision,
@@ -515,7 +486,6 @@ impl Model {
             decs,
             head_w,
             head_b,
-            head_b0: host.head_b[0],
             head_c: host.head_cin,
             head_classes: host.head_b.len(),
             levels,
@@ -524,8 +494,6 @@ impl Model {
             stats,
             ws: gpu.alloc(ws_bytes.max(1))?,
             out: (0, 'y'),
-            tap_names,
-            stats_trace: RefCell::new(None),
         })
     }
 
@@ -543,12 +511,6 @@ impl Model {
             }
         }
         seen
-    }
-
-    /// The head's input: the last decoder output `[p^3, head_c]`, and a 1-class head's weight and bias
-    pub fn head(&self) -> (&Buf, usize, &Buf, f32) {
-        let h = self.heads();
-        (h.x, h.cin, h.w, self.head_b0)
     }
 
     /// The head of any number of classes, and the last decoder output it reads
@@ -610,15 +572,7 @@ impl Model {
                 Arg::F32(eps),
             ],
         )?;
-        if let Some(trace) = self.stats_trace.borrow_mut().as_mut() {
-            trace.push(gpu.download_range(&self.stats[slot], 0, cols)?);
-        }
         Ok(())
-    }
-
-    /// Starts recording every InstanceNorm's statistics, or stops and returns what was recorded
-    pub fn trace_stats(&self, on: bool) -> Option<Vec<Vec<[f32; 2]>>> {
-        self.stats_trace.replace(on.then(Vec::new))
     }
 
     /// Statistics and apply of `c`'s output `raw` into `out` (and `out2`), with an optional residual;
@@ -698,19 +652,10 @@ impl Model {
         gpu.launch_1d(self.kn.apply, vox * pairs, &args)
     }
 
-    /// The forward on [`Model::input`]; the result is [`Model::head`]'s input
+    /// The forward on [`Model::input`]; the result is [`Model::heads`]'s input
     pub fn forward(&mut self, ctx: &Ctx) -> Result<()> {
-        self.forward_with(ctx, &mut |_| Ok(()))
-    }
-
-    /// [`Model::forward`], calling `on_tap` with each tap as soon as it is written: later layers reuse
-    /// the per-level buffers (the decoder overwrites encoder outputs), so a tap read after the forward
-    /// may hold another tensor
-    pub fn forward_with(&mut self, ctx: &Ctx, on_tap: &mut dyn FnMut(Tap<'_>) -> Result<()>) -> Result<()> {
         let gpu = ctx.gpu;
         let lv = &self.levels;
-        let mut tap_names = vec![("input".to_string(), 0, 'i')];
-        on_tap(self.tap("input", 0, 'i'))?;
 
         // stem into level 0's `x`
         let v0: usize = lv[0].dims.iter().product();
@@ -720,11 +665,6 @@ impl Model {
             self.conv(ctx, s, cur_in, &lv[0].r)?;
             self.norm_apply(gpu, s, &lv[0].r, v0, Residual::None, s.leaky, (dst, s.cout / 2, 0), None, None)?;
             cur_in = dst;
-        }
-        if !self.stem.is_empty() {
-            let which = if (self.stem.len() - 1).is_multiple_of(2) { 'x' } else { 'y' };
-            on_tap(self.tap("stem", 0, which))?;
-            tap_names.push(("stem".into(), 0, which));
         }
 
         // encoder
@@ -818,17 +758,12 @@ impl Model {
                 pool,
             )?;
             cur_name = out_name;
-            if last_in_level {
-                let name = format!("enc{}", b.lout);
-                on_tap(self.tap(&name, b.lout, out_name))?;
-                tap_names.push((name, b.lout, out_name));
-            }
         }
 
         // decoder: lres is the bottleneck output
         let mut lres_level = self.blocks.last().map_or(0, |b| b.lout);
         let mut lres_name = cur_name;
-        for (d, dec) in self.decs.iter().enumerate() {
+        for dec in &self.decs {
             let l = dec.level;
             let (lo, vox) = (&lv[l], lv[l].dims.iter().product::<usize>());
             let lres = pick(lres_level, lres_name);
@@ -869,181 +804,9 @@ impl Model {
             }
             lres_level = l;
             lres_name = dec_dst(dec.convs.len() - 1);
-            let name = format!("dec{d}");
-            on_tap(self.tap(&name, l, lres_name))?;
-            tap_names.push((name, l, lres_name));
         }
         ensure!(lres_level == 0, "the last decoder stage must end at level 0, not {lres_level}");
         self.out = (0, lres_name);
-        self.tap_names = tap_names;
-        Ok(())
-    }
-
-    /// The tensors of the last forward: input, stem, each encoder level's output, each decoder stage.
-    /// Only the last decoder stage is sure to still hold its tensor; [`Model::forward_with`] sees each
-    /// one when it is written
-    pub fn taps(&self) -> Vec<Tap<'_>> {
-        self.tap_names.iter().map(|(name, l, which)| self.tap(name, *l, *which)).collect()
-    }
-
-    fn tap(&self, name: &str, l: usize, which: char) -> Tap<'_> {
-        let lv = &self.levels[l];
-        let buf = match which {
-            'i' => &self.input,
-            'x' => &lv.x,
-            _ => &lv.y,
-        };
-        let channels = if which == 'i' {
-            1
-        } else if name == "stem" {
-            self.stem.last().map_or(1, |s| s.cout)
-        } else if let Some(d) = name.strip_prefix("dec") {
-            self.decs[d.parse::<usize>().unwrap_or(0)].convs.last().map_or(0, |c| c.cout)
-        } else {
-            lv.c
-        };
-        let stride = if which == 'i' { self.in_c } else { channels };
-        Tap { name: name.to_string(), buf, dims: lv.dims, channels, stride, offset: 0 }
-    }
-
-    /// Runs the InstanceNorm statistics kernels on channels that break naive or shifted sums (an outlier
-    /// as the first value, a constant channel, a large common offset, spread values) and checks them
-    /// against a float64 two-pass on the host. `p0-ink3d` runs it before its forward
-    pub fn check_norm_stats(&self, gpu: &Gpu) -> Result<()> {
-        let (rows, cols, eps) = (128usize.pow(3), 32usize, 1e-5f32);
-        ensure!(self.stats[0].bytes() >= cols * 8, "stats buffer narrower than the check");
-        let value = |r: usize, c: usize| -> f32 {
-            match c {
-                // Sol's case: shifted sums from the first value went negative and doubled invstd
-                0 => {
-                    if r == 0 {
-                        16.0
-                    } else if r % 2 == 1 {
-                        1.0078125
-                    } else {
-                        1.0
-                    }
-                }
-                1 => 3.0,
-                2 => 100.0 + (r % 7) as f32 * 0.5,
-                _ => ((r.wrapping_mul(2_654_435_761) + c * 97) % 1000) as f32 / 250.0 - 2.0,
-            }
-        };
-        let pr = self.precision;
-        let stored = pr.encode(&(0..rows * cols).map(|i| value(i / cols, i % cols)).collect::<Vec<f32>>());
-        let host = pr.decode(&stored);
-        let x = gpu.upload(&stored)?;
-        self.stats(gpu, &x, None, (rows, cols), 0, eps)?;
-        let got: Vec<[f32; 2]> = gpu.download_range(&self.stats[0], 0, cols)?;
-        // the merge order is fixed, so a second run must give the same bits
-        self.stats(gpu, &x, None, (rows, cols), 0, eps)?;
-        let again: Vec<[f32; 2]> = gpu.download_range(&self.stats[0], 0, cols)?;
-        let bits = |v: &[[f32; 2]]| v.iter().flat_map(|p| [p[0].to_bits(), p[1].to_bits()]).collect::<Vec<_>>();
-        ensure!(bits(&got) == bits(&again), "norm statistics self-check: a second run gave different bits");
-        for (c, &[mean, invstd]) in got.iter().enumerate() {
-            let col = || (0..rows).map(|r| host[r * cols + c] as f64);
-            let m = col().sum::<f64>() / rows as f64;
-            let var = col().map(|v| (v - m) * (v - m)).sum::<f64>() / rows as f64;
-            let want = 1.0 / (var + eps as f64).sqrt();
-            let sd = var.sqrt();
-            ensure!(
-                (mean as f64 - m).abs() <= 1e-5 * (m.abs() + sd) && ((invstd as f64 - want) / want).abs() <= 1e-4,
-                "norm statistics self-check, channel {c}: mean {mean} invstd {invstd}, float64 gives {m} {want}"
-            );
-        }
-        Ok(())
-    }
-
-    /// Runs `u3_apply_pool` against `u3_apply` then `u3_pool2` on a synthetic 16^3 x 32 tensor, with a
-    /// plain residual and with a normalised one, and requires equal bytes in `out`, `out2` and the pooled
-    /// tensor: the fused kernel replaces the pair only if it is bit-identical. `p0-ink3d` runs it
-    pub fn check_apply_pool(&self, gpu: &Gpu) -> Result<()> {
-        let (edge, cols) = (16usize, 32usize);
-        let (vox, pairs, pv) = (edge.pow(3), cols / 2, (edge / 2).pow(3));
-        let wave = |i: usize, k: usize| ((i.wrapping_mul(2_654_435_761) + k * 7919) % 2000) as f32 / 400.0 - 2.5;
-        let pr = self.precision;
-        let size = pr.size();
-        let bf = |k: usize, n: usize| -> Vec<u8> { pr.encode(&(0..n).map(|i| wave(i, k)).collect::<Vec<f32>>()) };
-        let f32s = |k: usize, n: usize, lo: f32| -> Vec<f32> { (0..n).map(|i| lo + wave(i, k).abs()).collect() };
-        let stats_of =
-            |k: usize| -> Vec<[f32; 2]> { (0..cols).map(|c| [wave(c, k) * 0.1, 0.5 + wave(c, k + 1).abs()]).collect() };
-        let x = gpu.upload(&bf(1, vox * cols))?;
-        let res = gpu.upload(&bf(2, vox * cols))?;
-        let bias = gpu.upload(&pr.decode(&bf(3, cols)))?;
-        let (st, rst) = (gpu.upload(&stats_of(4))?, gpu.upload(&stats_of(6))?);
-        let (w, b) = (gpu.upload(&f32s(8, cols, 0.2))?, gpu.upload(&f32s(9, cols, -1.0))?);
-        let (rw, rb) = (gpu.upload(&f32s(10, cols, 0.2))?, gpu.upload(&f32s(11, cols, -1.0))?);
-        for normed in [false, true] {
-            let (rplain, rraw, rstats, rwa, rba) = if normed {
-                (Arg::EMPTY, pair_arg(pr, &res), rst.arg::<[f32; 2]>(), rw.arg::<f32>(), rb.arg::<f32>())
-            } else {
-                (pair_arg(pr, &res), Arg::EMPTY, Arg::EMPTY, Arg::EMPTY, Arg::EMPTY)
-            };
-            let inputs = [
-                pair_arg(pr, &x),
-                bias.arg::<f32>(),
-                st.arg::<[f32; 2]>(),
-                w.arg::<f32>(),
-                b.arg::<f32>(),
-                rplain,
-                rraw,
-                rstats,
-                rwa,
-                rba,
-            ];
-            // out packed, out2 the second half of a concat buffer, as a stage's last block writes them
-            let tail = [
-                Arg::U32(cols as u32),
-                Arg::U32(1),
-                Arg::F32(0.01),
-                Arg::U32(pairs as u32),
-                Arg::U32(0),
-                Arg::U32(cols as u32),
-                Arg::U32(pairs as u32),
-            ];
-            let mk = || -> Result<[Buf; 3]> {
-                Ok([
-                    gpu.alloc_fill(vox * cols * size, 0xa5)?,
-                    gpu.alloc_fill(vox * cols * 2 * size, 0xa5)?,
-                    gpu.alloc_fill(pv * cols * size, 0xa5)?,
-                ])
-            };
-            let [oa, o2a, pa] = mk()?;
-            let args: Vec<Arg> = [pair_arg(pr, &oa), pair_arg(pr, &o2a)]
-                .into_iter()
-                .chain(inputs)
-                .chain([Arg::U32(vox as u32)])
-                .chain(tail)
-                .collect();
-            gpu.launch_1d(self.kn.apply, vox * pairs, &args)?;
-            let e = Arg::U32((edge / 2) as u32);
-            gpu.launch_1d(
-                self.kn.pool2,
-                pv * pairs,
-                &[pair_arg(pr, &pa), pair_arg(pr, &oa), e, e, e, Arg::U32(cols as u32)],
-            )?;
-            let [ob, o2b, pb] = mk()?;
-            let args: Vec<Arg> = [pair_arg(pr, &ob), pair_arg(pr, &o2b), pair_arg(pr, &pb)]
-                .into_iter()
-                .chain(inputs)
-                .chain([e, e, e])
-                .chain(tail)
-                .collect();
-            gpu.launch_1d(self.kn.apply_pool, pv * pairs, &args)?;
-            for (what, a, bb) in [("out", &oa, &ob), ("out2", &o2a, &o2b), ("pool", &pa, &pb)] {
-                let (va, vb) = (gpu.download::<u8>(a)?, gpu.download::<u8>(bb)?);
-                let diff = va.chunks_exact(size).zip(vb.chunks_exact(size)).filter(|(p, q)| p != q).count();
-                ensure!(
-                    va.len() == vb.len() && diff == 0,
-                    "{} self-check (normed {normed}): {what} differs in {diff} of {} values",
-                    self.kn.apply_pool,
-                    va.len() / size
-                );
-            }
-            // the sentinel must be gone everywhere apply writes, or the comparison proves nothing
-            let filled = gpu.download::<u8>(&ob)?.chunks_exact(size).filter(|v| v.iter().all(|&b| b == 0xa5)).count();
-            ensure!(filled == 0, "{} self-check: {filled} output values never written", self.kn.apply_pool);
-        }
         Ok(())
     }
 }

@@ -12,7 +12,6 @@ files here carry or port it, and reproduces its licence.
      normalisation, seg head, softmax, ramp blend and uint8 finish
    - volkit/src/unet3d/model.rs, volkit-kernels/src/unet3d.rs: the ResEnc U-Net forward villa's nnU-Net
      models run, under PyTorch's float32, bf16 and fp16 semantics
-   - volkit/src/zarr.rs, volkit/src/unet3d/zio.rs: the zarr arrays villa reads and writes
 
 MIT License
 
