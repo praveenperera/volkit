@@ -11,6 +11,11 @@ The crate builds the CUDA runtime on Linux and Windows. On macOS it builds empty
 volkit = "0.1"
 ```
 
+volkit defaults to parity with the reference runner: `AfvPrecision::Fp32` is the default, and `AfvPrecision::Bf16` is an
+opt-in speed mode with small, measured differences (the
+[README](https://github.com/praveenperera/volkit#precision) gives the figures). Every speed figure names the
+precision it was measured at.
+
 At run time it needs an NVIDIA driver, `libcudnn.so.9` (cuDNN 9) and `libcublas.so.12` on the loader path. cudakit
 loads them with `dlopen` and checks their symbols before the first call, so a missing library is an error from
 `AfvV2::open`, not a crash.
@@ -30,10 +35,12 @@ pub const MAX_BATCH: usize = 16;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AfvPrecision {
-    /// The reference contract: float32 tensors with TF32 conv and GEMM math, as PyTorch's float32 defaults
+    /// The default, for parity with the reference runner (villa's `lasagna.qualzz_inference` on PyTorch): float32
+    /// tensors with TF32 tensor-core conv and GEMM math, as PyTorch's float32 defaults run the model
     #[default]
     Fp32,
-    /// Opt-in, changed output: PyTorch's bf16 autocast forward
+    /// Opt-in speed mode with small, measured differences: PyTorch's bf16 autocast forward. Against float32,
+    /// about 99% of traced fibre length agrees (99.2-99.4%) and 97.0-97.8% of fibres match. Never the default
     Bf16,
 }
 impl AfvPrecision {

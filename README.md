@@ -24,6 +24,19 @@ let column = net.finish(true)?; // semantic (2, nz, ny, nx) and tracing (2, nz/2
 
 [docs/API.md](https://github.com/praveenperera/volkit/blob/master/docs/API.md) lists the public API and environment variables.
 
+## Precision
+
+volkit defaults to parity with the current best implementation, the public reference runner (villa's `lasagna.qualzz_inference` on PyTorch).
+
+- **`AfvPrecision::Fp32`, the default**, runs at the reference's precision: float32 tensors with TF32 tensor-core convolutions and GEMMs, as PyTorch's float32 defaults run the model. Its output is byte-identical to inkrs 0.4.0's AFV v2 engine.
+- **`AfvPrecision::Bf16`** is an opt-in speed mode with small, measured differences. It is never the default and is not used for published fibre sets. Measured against float32 on two CT bands with vertical and horizontal fibres (driver 595.112.07), tracing fibres on both outputs:
+  - about 99% of traced fibre length agrees (99.2-99.4%);
+  - 97.0-97.8% of fibres match;
+  - fibre counts are within 0.3%;
+  - over the foreground, the 99.9th percentile of the absolute difference in the output fields is 7 to 11 of 255.
+
+Every speed figure for volkit names the precision it was measured at.
+
 ## Requirements
 
 - Linux or Windows x86_64 with an NVIDIA GPU of compute capability 8.0 or above (RTX 30 / A100 and later). On macOS the crate builds empty.

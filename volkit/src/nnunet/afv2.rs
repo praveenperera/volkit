@@ -47,11 +47,13 @@ pub const MAX_BATCH: usize = 16;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AfvPrecision {
-    /// The reference contract: float32 tensors with TF32 convolution and GEMM math, as PyTorch's float32 defaults
-    /// run the model
+    /// The default, for parity with the reference runner (villa's `lasagna.qualzz_inference` on PyTorch): float32
+    /// tensors with TF32 tensor-core convolution and GEMM math, as PyTorch's float32 defaults run the model
     #[default]
     Fp32,
-    /// Opt-in, changed output: PyTorch's bf16 autocast forward (see the module docs)
+    /// Opt-in speed mode with small, measured differences: PyTorch's bf16 autocast forward (see the module docs).
+    /// Measured against float32 on two CT bands, about 99% of traced fibre length agrees (99.2-99.4%), 97.0-97.8%
+    /// of fibres match and fibre counts are within 0.3%. Never the default
     Bf16,
 }
 
