@@ -497,15 +497,26 @@ impl Model {
         })
     }
 
-    /// Every distinct conv plan with its algorithm, for the report
+    /// Every distinct conv plan with its algorithm and timing, for the report
     pub fn plans(&self) -> Vec<String> {
+        self.distinct(|plan| format!("{} | {}", plan.shape, plan.algo))
+    }
+
+    /// Every distinct conv plan with its algorithm choice and no timing, in forward order: equal for two loads
+    /// that chose the same algorithms
+    pub fn algos(&self) -> Vec<String> {
+        self.distinct(|plan| format!("{} | {}", plan.shape, plan.algo.choice()))
+    }
+
+    /// `line` of each conv's plan in forward order (stem, encoder blocks, decoder), each distinct line once
+    fn distinct(&self, line: impl Fn(&ConvPlan) -> String) -> Vec<String> {
         let mut seen = Vec::new();
         let all = self
             .stem
             .iter()
             .chain(self.blocks.iter().flat_map(|b| [&b.conv1, &b.conv2].into_iter().chain(b.proj.iter())));
         for c in all.chain(self.decs.iter().flat_map(|d| d.convs.iter())) {
-            let s = format!("{} | {}", c.plan.shape, c.plan.algo);
+            let s = line(&c.plan);
             if !seen.contains(&s) {
                 seen.push(s);
             }

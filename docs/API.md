@@ -59,13 +59,19 @@ pub struct Options {
 
 /// What loading the engine took and chose (serialisable to JSON)
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct LoadReport {
     pub model: String,
     pub precision: AfvPrecision,
     pub patch: usize,
     pub border: usize,
     pub load_s: f64,
+    /// Each conv plan with the time cuDNN measured for it, `shape | ALGO MATH ws N B, T ms`
     pub plans: Vec<String>,
+    /// (new) The algorithm choices without timings, `shape | ALGO MATH ws N B`: each distinct conv in forward
+    /// order, then the float32 seg head (none for the bf16 head). Two loads chose the same algorithms, and so
+    /// round the same way, exactly when these lists are equal
+    pub algos: Vec<String>,
     pub head_plan: String,
     pub head_channels: usize,
     pub algo_cache: volkit::dnn::algo_cache::Status,
@@ -82,6 +88,7 @@ pub struct LoadReport {
 /// `(2, nz / 2, ny / 2, nx / 2)`, C order; `None` when `finish(false)` (the reference writes nothing for an
 /// all-air column)
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ColumnOut {
     pub shape: [usize; 3],
     pub semantic: Option<Vec<u8>>,
@@ -93,6 +100,7 @@ pub struct ColumnOut {
 
 /// A tile's normalisation: float32 mean and floored unbiased std
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[non_exhaustive]
 pub struct TileStats {
     pub mean: f32,
     pub std: f32,
@@ -144,6 +152,10 @@ lattice of stride 96 over the band padded by 16, grouped into columns. Per colum
 column's non-air tiles in the reference's order, then `finish`. This is exactly the sequence `inkrs.AfvV2`'s Python
 layer drives; volkit has no tiler for it (`nnunet::grid` and `nnunet::engine` are the `vesuvius.predict` engine,
 which AFV v2 does not use, and stay in inkrs).
+
+`LoadReport`, `ColumnOut` and `TileStats` are `#[non_exhaustive]` (new): read their fields freely, but outside volkit
+they cannot be built with a struct literal or destructured without `..`, so a later release can add fields without
+a breaking change. `TileStats::of` builds one.
 
 ## `volkit::dnn`
 

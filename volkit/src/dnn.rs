@@ -205,20 +205,26 @@ pub(crate) struct AlgoPerf {
     pub deterministic: bool,
 }
 
-impl fmt::Display for AlgoPerf {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl AlgoPerf {
+    /// The choice without its timing, `ALGO MATH ws N B`, plus ` nondeterministic` or ` (unsupported)`: the same
+    /// for the same algorithm on every load, so two loads' choices compare as strings
+    pub fn choice(&self) -> String {
         let algo = format!("{:?}", self.algo);
         let math = format!("{:?}", self.math);
-        write!(
-            f,
-            "{} {} {:.3} ms ws {} B{}{}",
+        format!(
+            "{} {} ws {} B{}{}",
             algo.trim_start_matches("CUDNN_CONVOLUTION_FWD_ALGO_"),
             math.trim_start_matches("CUDNN_"),
-            self.ms,
             self.workspace,
             if self.deterministic { "" } else { " nondeterministic" },
             if self.status == dnn::cudnnStatus_t::CUDNN_STATUS_SUCCESS { "" } else { " (unsupported)" },
         )
+    }
+}
+
+impl fmt::Display for AlgoPerf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}, {:.3} ms", self.choice(), self.ms)
     }
 }
 
@@ -640,6 +646,22 @@ mod tests {
             math,
             deterministic: true,
         }
+    }
+
+    /// `LoadReport::algos` compares these across loads: the choice must leave the timing out
+    #[test]
+    fn a_choice_carries_no_timing() {
+        use dnn::cudnnConvolutionFwdAlgo_t::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM as PRECOMP;
+        use dnn::cudnnMathType_t::CUDNN_TENSOR_OP_MATH as TENSOR;
+
+        let mut fast = perf(PRECOMP, TENSOR, 1744);
+        let mut slow = fast;
+        slow.ms = 0.25;
+        assert_eq!(fast.choice(), "IMPLICIT_PRECOMP_GEMM TENSOR_OP_MATH ws 1744 B");
+        assert_eq!(fast.choice(), slow.choice());
+        assert_eq!(slow.to_string(), "IMPLICIT_PRECOMP_GEMM TENSOR_OP_MATH ws 1744 B, 0.250 ms");
+        fast.deterministic = false;
+        assert_eq!(fast.choice(), "IMPLICIT_PRECOMP_GEMM TENSOR_OP_MATH ws 1744 B nondeterministic");
     }
 
     #[test]

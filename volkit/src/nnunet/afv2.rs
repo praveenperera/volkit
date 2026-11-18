@@ -89,6 +89,7 @@ pub struct Options {
 
 /// What loading the engine took and chose
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct LoadReport {
     /// The model path or name loaded
     pub model: String,
@@ -100,8 +101,14 @@ pub struct LoadReport {
     pub border: usize,
     /// Seconds spent loading and planning
     pub load_s: f64,
-    /// A one-line description of each convolution plan
+    /// A one-line description of each convolution plan, with the time cuDNN measured for it
     pub plans: Vec<String>,
+    /// The cuDNN algorithm chosen for each distinct convolution, in forward order (stem, encoder, decoder), then
+    /// the float32 seg head's (the bf16 head is a kernel of volkit's own and adds none). Each entry is
+    /// `shape | ALGO MATH ws N B`, with ` nondeterministic` or ` (unsupported)` appended where they apply, and
+    /// carries no timing, so two loads chose the same algorithms (and so round the same way) exactly when their
+    /// lists are equal
+    pub algos: Vec<String>,
     /// The seg head's cuDNN plan (fp32) or kernel (bf16), and the output channels it runs (4, or padded to 8 on
     /// cuDNN)
     pub head_plan: String,
@@ -129,6 +136,7 @@ pub struct LoadReport {
 /// One column's outputs: `semantic` `(2, nz, ny, nx)` and `tracing` `(2, nz / 2, ny / 2, nx / 2)` uint8, channels
 /// vertical then horizontal, or `None` when no tile ran (the reference writes nothing for an all-air column)
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ColumnOut {
     /// The column's `[z, y, x]` size in voxels
     pub shape: [usize; 3],
@@ -144,6 +152,7 @@ pub struct ColumnOut {
 
 /// A tile's normalisation: the reference's float32 mean and floored unbiased std
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[non_exhaustive]
 pub struct TileStats {
     /// The tile's mean over its codes
     pub mean: f32,
@@ -303,6 +312,10 @@ impl AfvV2 {
             }
         };
         let logits_bytes = vox * head_channels * 4;
+        let mut algos = model_gpu.algos();
+        if let SegHead::Conv { plan, .. } = &head {
+            algos.push(format!("{} | {}", plan.shape, plan.algo.choice()));
+        }
 
         let load = LoadReport {
             model: contract.name.clone(),
@@ -311,6 +324,7 @@ impl AfvV2 {
             border: recipe.border,
             load_s: 0.0,
             plans: model_gpu.plans(),
+            algos,
             head_plan,
             head_channels,
             algo_cache: algo_cache::status(),
