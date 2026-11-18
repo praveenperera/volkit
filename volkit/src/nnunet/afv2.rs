@@ -110,6 +110,10 @@ pub struct LoadReport {
     /// The cuDNN this process loaded (`cudnnGetVersion`): inside PyTorch it is PyTorch's own, which can choose
     /// other kernels than the system cuDNN a standalone process loads, and so other output bits
     pub cudnn: usize,
+    /// The cuBLAS this process loaded (`cublasGetVersion`, such as 120804 for 12.8.4). volkit calls it through CUDA
+    /// 12 bindings, so anything but 12.x means the loader found another major first (see the README's library
+    /// versions note)
+    pub cublas: i32,
     /// Whether the stem's input channels are padded because cuDNN refuses a one-channel 3D convolution
     pub stem_padded: bool,
     /// The PTX tier whose kernels were loaded
@@ -309,6 +313,7 @@ impl AfvV2 {
             head_channels,
             algo_cache: algo_cache::status(),
             cudnn: Dnn::version(),
+            cublas: gpu.inner.library_versions()?.cublas,
             stem_padded: model_gpu.in_c != 1,
             ptx_tier: gpu.inner.ptx_tier().to_string(),
             gpu: gpu.inner.context().name()?,

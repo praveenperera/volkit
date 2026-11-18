@@ -29,6 +29,12 @@ let column = net.finish(true)?; // semantic (2, nz, ny, nx) and tracing (2, nz/2
 - Linux or Windows x86_64 with an NVIDIA GPU of compute capability 8.0 or above (RTX 30 / A100 and later). On macOS the crate builds empty.
 - At run time: the NVIDIA driver, cuDNN 9 and cuBLAS, loaded with `dlopen` and checked before first use. Building needs no CUDA toolkit.
 
+### Library versions on Linux
+
+volkit calls cuBLAS 12 and cuDNN 9 through CUDA 12 bindings. Its loader (cudarc's) tries the unversioned names `libcublas.so` and `libcudnn.so` before the versioned `libcublas.so.12` and `libcudnn.so.9`, and nothing in volkit can change that order. So when the loader path holds a CUDA 13 toolkit's `lib64` (its unversioned `libcublas.so` points at cuBLAS 13), volkit loads cuBLAS 13 and calls it through 12.x bindings. That ran correctly in testing, but it is not a supported setup. `LoadReport::cublas` reports the version that loaded: anything outside 120000-129999 is this case.
+
+To keep the 12.x libraries, keep CUDA 13 library directories off `LD_LIBRARY_PATH` (and out of `ld.so.conf`) for the process, or put first on `LD_LIBRARY_PATH` a directory holding `libcublas.so -> libcublas.so.12` and `libcudnn.so -> libcudnn.so.9` symlinks to the libraries you want. cuBLAS loads its own `libcublasLt.so.12` by its versioned name. Windows is not affected: CUDA installs its DLLs only under names that carry their major (`cublas64_13.dll`), which the 12.x candidate list never names.
+
 ## Layout
 
 | Path | What |

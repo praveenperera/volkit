@@ -75,6 +75,13 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      # docs.rs builds these docs, so a broken intra-doc link fails here first
+      - name: Docs
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p volkit --no-deps --locked
+
   # on macOS the crate builds empty, which a consumer gating its dependency to Linux never relies on but a
   # workspace build of theirs may still compile
   macos:

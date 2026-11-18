@@ -63,6 +63,8 @@ pub struct LoadReport {
     pub head_channels: usize,
     pub algo_cache: volkit::dnn::algo_cache::Status,
     pub cudnn: usize,
+    /// (new) `cublasGetVersion` of the cuBLAS loaded, such as 120804; see the README on library versions
+    pub cublas: i32,
     pub stem_padded: bool,
     pub ptx_tier: String,
     pub gpu: String,
