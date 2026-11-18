@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, bail, ensure, eyre};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::ensure_supported;
@@ -65,6 +65,10 @@ impl Export {
         let dataset = read_json(&root.join("dataset.json"))?;
         let pth = Pth::open(&checkpoint)?;
         let source = Source::read(pth.payload()).wrap_err_with(|| format!("reading {}", checkpoint.display()))?;
+        // the architecture first: another network's checkpoint lacks the ResEnc names looked up below, and has to be
+        // refused as unsupported rather than as malformed
+        let config = configuration(&plans, &source.configuration)?;
+        let arch = architecture(config)?;
 
         let labels =
             dataset.get("labels").and_then(Value::as_object).ok_or_else(|| eyre!("dataset.json has no labels"))?;
@@ -83,10 +87,9 @@ impl Export {
             .ok_or_else(|| eyre!("checkpoint has no encoder.stem.convs.0.conv.weight"))?;
         let in_channels = *stem.1.shape().get(1).ok_or_else(|| eyre!("stem weight of shape {:?}", stem.1.shape()))?;
 
-        let config = configuration(&plans, &source.configuration)?;
         let recipe = afv_v2_recipe(&plans, config, &dataset)?;
         let patch = patch_size(config)?;
-        let network = Network::from_plans(&plans, &source.configuration, in_channels, num_classes)?;
+        let network = Network::from_plans(arch, in_channels, num_classes)?;
         let mapped = network.map(&source.state)?;
 
         let mut dropped: Vec<(String, &str)> = source.auxiliary.iter().map(|k| (k.clone(), AUX_REASON)).collect();
@@ -97,10 +100,9 @@ impl Export {
             .map(|(name, t)| Ok(Tensor { name: name.clone(), shape: t.shape().to_vec(), data: pth.tensor_f32(t)? }))
             .collect::<Result<Vec<_>>>()?;
 
-        let keys: serde_json::Map<String, Value> = tensors.iter().map(|t| (t.name.clone(), json!(t.shape))).collect();
-        let aliases: serde_json::Map<String, Value> =
-            mapped.aliases.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
-        let dropped: serde_json::Map<String, Value> = dropped.into_iter().map(|(k, v)| (k, json!(v))).collect();
+        let keys: Map<String, Value> = tensors.iter().map(|t| (t.name.clone(), json!(t.shape))).collect();
+        let aliases: Map<String, Value> = mapped.aliases.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        let dropped: Map<String, Value> = dropped.into_iter().map(|(k, v)| (k, json!(v))).collect();
         let sidecar = json!({
             "format": FORMAT,
             "name": NAME,
@@ -128,7 +130,8 @@ impl Export {
     /// The safetensors header is written here rather than by the `safetensors` crate, which serialises its
     /// metadata map in random order; written this way the file matches the Python exporter's byte for byte. Both
     /// files are written in full under temporary names before either is renamed into place, so a failed write
-    /// leaves an existing export as it was
+    /// leaves an existing export as it was. The two renames are not one atomic step: if the sidecar's rename fails
+    /// after the weights', the new weights sit beside the old sidecar, and the error says so
     pub fn write(&self, path: &Path) -> Result<()> {
         let mut sorted: Vec<&Tensor> = self.tensors.iter().collect();
         // safetensors orders tensors by descending dtype alignment, then by name; all are float32 here
@@ -173,7 +176,7 @@ impl Export {
         self.sidecar.serialize(&mut serde_json::Serializer::with_formatter(&mut json, formatter))?;
         let sidecar = Partial::write(&path.with_extension("json"), |w| Ok(w.write_all(&json)?))?;
         weights.commit()?;
-        sidecar.commit()
+        sidecar.commit().wrap_err("the new weights are in place beside the old sidecar")
     }
 
     /// The unique tensors (name -> (shape, float32 data)) and aliases (alias -> target), for an in-memory load
@@ -241,8 +244,10 @@ impl Partial {
     fn write(path: &Path, write: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<Self> {
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".partial");
-        let partial = Self { tmp: PathBuf::from(tmp), path: path.to_path_buf() };
-        let file = File::create(&partial.tmp).wrap_err_with(|| format!("creating {}", partial.tmp.display()))?;
+        let tmp = PathBuf::from(tmp);
+        let file = File::create(&tmp).wrap_err_with(|| format!("creating {}", tmp.display()))?;
+        // owned, and so removed on failure, only once created here: a name this could not open is not ours to delete
+        let partial = Self { tmp, path: path.to_path_buf() };
         let mut w = BufWriter::new(file);
         write(&mut w).and_then(|()| Ok(w.flush()?)).wrap_err_with(|| format!("writing {}", partial.tmp.display()))?;
         Ok(partial)
@@ -375,6 +380,14 @@ fn configuration<'a>(plans: &'a Value, name: &str) -> Result<&'a Value> {
     plans.get("configurations").and_then(|c| c.get(name)).ok_or_else(|| eyre!("plans have no configuration {name}"))
 }
 
+/// A configuration's `architecture` section, refused as unsupported unless it is a [`ARCH`]
+fn architecture(config: &Value) -> Result<&Value> {
+    let arch = config.get("architecture").ok_or_else(|| eyre!("configuration has no architecture"))?;
+    let class = arch.get("network_class_name").and_then(Value::as_str);
+    ensure_supported!(class == Some(ARCH), "unsupported: network {class:?}, only {ARCH}");
+    Ok(arch)
+}
+
 fn patch_size(config: &Value) -> Result<[usize; 3]> {
     let patch = config.get("patch_size").cloned().ok_or_else(|| eyre!("configuration has no patch_size"))?;
     serde_json::from_value(patch).wrap_err("patch_size is not three sizes")
@@ -408,9 +421,9 @@ fn afv_v2_recipe(plans: &Value, config: &Value, dataset: &Value) -> Result<Value
     }))
 }
 
-/// `arch_kwargs` of a ResEnc plan; any key beyond these (a bottleneck block, a custom stem) is refused
+/// `arch_kwargs` of a ResEnc plan; any key beyond these (a bottleneck block, a custom stem) is a network variant
+/// this does not build, refused as unsupported, while a known key of the wrong type is malformed
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ArchKwargs {
     n_stages: usize,
     features_per_stage: Vec<usize>,
@@ -428,21 +441,24 @@ struct ArchKwargs {
     _dropout_op_kwargs: Option<Value>,
     nonlin: String,
     nonlin_kwargs: Option<NonlinKwargs>,
+    #[serde(flatten)]
+    other: Map<String, Value>,
 }
 
 /// InstanceNorm3d's arguments, with torch's defaults
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct NormKwargs {
     #[serde(default = "default_eps")]
     eps: f64,
     #[serde(default)]
     affine: bool,
+    #[serde(flatten)]
+    other: Map<String, Value>,
 }
 
 impl Default for NormKwargs {
     fn default() -> Self {
-        Self { eps: default_eps(), affine: false }
+        Self { eps: default_eps(), affine: false, other: Map::new() }
     }
 }
 
@@ -452,13 +468,20 @@ fn default_eps() -> f64 {
 
 /// LeakyReLU's arguments, with torch's defaults
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct NonlinKwargs {
     #[serde(default = "default_slope")]
     negative_slope: f64,
     /// Changes no result
     #[serde(default, rename = "inplace")]
     _inplace: bool,
+    #[serde(flatten)]
+    other: Map<String, Value>,
+}
+
+impl Default for NonlinKwargs {
+    fn default() -> Self {
+        Self { negative_slope: default_slope(), _inplace: false, other: Map::new() }
+    }
 }
 
 fn default_slope() -> f64 {
@@ -547,22 +570,23 @@ struct Mapped<'a> {
 }
 
 impl Network {
-    fn from_plans(plans: &Value, configuration_name: &str, in_channels: usize, num_classes: usize) -> Result<Self> {
-        let arch =
-            configuration(plans, configuration_name)?.get("architecture").ok_or_else(|| eyre!("no architecture"))?;
-        let class = arch.get("network_class_name").and_then(Value::as_str);
-        ensure_supported!(class == Some(ARCH), "unsupported: network {class:?}, only {ARCH}");
+    /// The network an [`architecture`] section describes
+    fn from_plans(arch: &Value, in_channels: usize, num_classes: usize) -> Result<Self> {
         let kwargs = arch.get("arch_kwargs").cloned().ok_or_else(|| eyre!("no arch_kwargs"))?;
-        let kw: ArchKwargs =
-            serde_json::from_value(kwargs).map_err(|e| Unsupported(format!("unsupported arch_kwargs: {e}")))?;
+        let kw: ArchKwargs = serde_json::from_value(kwargs).wrap_err("malformed arch_kwargs")?;
+        let norm = kw.norm_op_kwargs.unwrap_or_default();
+        let nonlin = kw.nonlin_kwargs.unwrap_or_default();
+        let sections = [("arch_kwargs", &kw.other), ("norm_op_kwargs", &norm.other), ("nonlin_kwargs", &nonlin.other)];
+        let unknown: Vec<String> =
+            sections.iter().flat_map(|(section, other)| other.keys().map(move |k| format!("{section}.{k}"))).collect();
+        ensure_supported!(unknown.is_empty(), "unsupported: {unknown:?}");
 
         ensure_supported!(CONV_OPS.contains(&kw.conv_op.as_str()), "unsupported: conv_op {}", kw.conv_op);
         ensure_supported!(NORM_OPS.contains(&kw.norm_op.as_str()), "unsupported: norm_op {}", kw.norm_op);
         ensure_supported!(NONLINS.contains(&kw.nonlin.as_str()), "unsupported: nonlin {}", kw.nonlin);
         ensure_supported!(kw.dropout_op.is_none(), "unsupported: dropout {:?}", kw.dropout_op);
-        let norm = kw.norm_op_kwargs.unwrap_or_default();
         ensure_supported!(norm.affine, "unsupported: InstanceNorm3d without affine");
-        let slope = kw.nonlin_kwargs.map_or(default_slope(), |k| k.negative_slope);
+        let slope = nonlin.negative_slope;
 
         let n = kw.n_stages;
         ensure_supported!(n >= 2, "unsupported: {n} stages");
@@ -923,7 +947,7 @@ mod tests {
     fn program_from_plans_matches_fixture() -> Result<()> {
         let sidecar = fixture("afv2.json")?;
         let plans = fixture("afv2.plans.json")?;
-        let network = Network::from_plans(&plans, "3d_fullres", 1, 4)?;
+        let network = Network::from_plans(architecture(configuration(&plans, "3d_fullres")?)?, 1, 4)?;
         assert_eq!(serde_json::to_value(&network.program)?, sidecar["program"]);
         assert_eq!(json!(2 * network.macs([128; 3])?), sidecar["flops_per_patch"]);
 
@@ -959,9 +983,30 @@ mod tests {
         let refused = afv_v2_recipe(&plans, config, &dataset).expect_err("other labels refused");
         assert!(crate::error::is_unsupported(&refused), "{refused:?}");
 
+        let arch = |plans: &Value| -> Result<Network> {
+            Network::from_plans(architecture(configuration(plans, "3d_fullres")?)?, 1, 4)
+        };
         let mut wide = plans.clone();
-        wide["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"]["dropout_op"] = json!("torch.nn.Dropout3d");
-        let refused = Network::from_plans(&wide, "3d_fullres", 1, 4).err().expect("dropout refused");
+        let kwargs = &mut wide["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"];
+        kwargs["dropout_op"] = json!("torch.nn.Dropout3d");
+        let refused = arch(&wide).err().expect("dropout refused");
+        assert!(crate::error::is_unsupported(&refused), "{refused:?}");
+
+        // a key no ResEnc plan has is another variant, unsupported; a known key of the wrong type is malformed
+        let mut extra = plans.clone();
+        extra["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"]["block"] = json!("BottleneckD");
+        let refused = arch(&extra).err().expect("unknown key refused");
+        assert!(crate::error::is_unsupported(&refused), "{refused:?}");
+        let mut broken = plans.clone();
+        broken["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"]["n_stages"] = json!("6");
+        let refused = arch(&broken).err().expect("string n_stages refused");
+        assert!(!crate::error::is_unsupported(&refused), "{refused:?}");
+
+        // checked before any state dict name, which another network's checkpoint does not have
+        let mut plain = plans.clone();
+        plain["configurations"]["3d_fullres"]["architecture"]["network_class_name"] =
+            json!("dynamic_network_architectures.architectures.unet.PlainConvUNet");
+        let refused = architecture(&plain["configurations"]["3d_fullres"]).expect_err("PlainConvUNet refused");
         assert!(crate::error::is_unsupported(&refused), "{refused:?}");
         Ok(())
     }

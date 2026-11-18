@@ -446,6 +446,14 @@ struct Storage {
 struct DictObj {
     entries: Vec<(Id, Id)>,
     keys: HashSet<Key>,
+    /// An `OrderedDict`, which unlike a plain dict carries attributes (BUILD state)
+    ordered: bool,
+}
+
+impl DictObj {
+    fn empty(ordered: bool) -> Obj {
+        Obj::Dict(Self { entries: Vec::new(), keys: HashSet::new(), ordered })
+    }
 }
 
 struct ObjectObj {
@@ -497,6 +505,7 @@ fn unpickle(data: &[u8], storage_len: &dyn Fn(&str) -> Option<usize>) -> Result<
         memo: HashMap::new(),
         storage_len,
         storages: HashMap::new(),
+        key_budget: Budget { values: MAX_VALUES, bytes: MAX_VALUE_BYTES },
     };
     let root = machine.run()?;
     let mut budget = Budget { values: MAX_VALUES, bytes: MAX_VALUE_BYTES };
@@ -511,6 +520,8 @@ struct Machine<'a> {
     memo: HashMap<u32, Id>,
     storage_len: &'a dyn Fn(&str) -> Option<usize>,
     storages: HashMap<String, (Dtype, usize)>,
+    /// What is left for dict keys, which copy their strings and bytes out of the objects as they are set
+    key_budget: Budget,
 }
 
 impl Machine<'_> {
@@ -619,10 +630,10 @@ impl Machine<'_> {
                 let items = self.pop_mark()?;
                 self.append(items)?;
             }
-            b'}' => self.push(Obj::Dict(DictObj { entries: Vec::new(), keys: HashSet::new() }))?,
+            b'}' => self.push(DictObj::empty(false))?,
             b'd' => {
                 let items = self.pop_mark()?;
-                self.push(Obj::Dict(DictObj { entries: Vec::new(), keys: HashSet::new() }))?;
+                self.push(DictObj::empty(false))?;
                 self.set_items(items)?;
             }
             b's' => {
@@ -682,7 +693,8 @@ impl Machine<'_> {
                 let kind = self.kind(target);
                 // `Module.state_dict()` returns an OrderedDict carrying a `_metadata` attribute (each module's
                 // version), which pickles as BUILD with that attribute dict: nothing here reads it
-                if let Obj::Dict(_) = &self.objs[target] {
+                if let Obj::Dict(dict) = &self.objs[target] {
+                    ensure!(dict.ordered, "BUILD on a plain dict, which takes no state");
                     return Ok(());
                 }
 
@@ -816,7 +828,11 @@ impl Machine<'_> {
         }
 
         ensure!(matches!(self.objs[target], Obj::Dict(_)), "SETITEM on a {}", self.kind(target));
-        let keys = pairs.iter().map(|&(k, _)| self.key(k, 0)).collect::<Result<Vec<_>>>()?;
+        // charged as it is built, so a key sharing one long string many times stops at the limit rather than copying it
+        let mut budget = std::mem::replace(&mut self.key_budget, Budget { values: 0, bytes: 0 });
+        let keys = pairs.iter().map(|&(k, _)| self.key(k, 0, &mut budget)).collect::<Result<Vec<_>>>();
+        self.key_budget = budget;
+        let keys = keys?;
         let Obj::Dict(dict) = &mut self.objs[target] else { bail!("SETITEM target changed") };
         for (key, pair) in keys.into_iter().zip(pairs) {
             // Python would replace the value in place; no writer emits a key twice, so a repeat is refused
@@ -827,8 +843,9 @@ impl Machine<'_> {
         Ok(())
     }
 
-    fn key(&self, id: Id, depth: usize) -> Result<Key> {
+    fn key(&self, id: Id, depth: usize, budget: &mut Budget) -> Result<Key> {
         ensure!(depth < MAX_DEPTH, "dict key nested too deep");
+        budget.take(self.data_bytes(id))?;
         Ok(match &self.objs[id] {
             Obj::None => Key::None,
             Obj::Bool(b) => Key::Int((*b).into()),
@@ -839,7 +856,9 @@ impl Machine<'_> {
             Obj::Float(f) => Key::Float(f.to_bits()),
             Obj::Str(s) => Key::Str(s.clone()),
             Obj::Bytes(b) => Key::Bytes(b.clone()),
-            Obj::Tuple(items) => Key::Tuple(items.iter().map(|&i| self.key(i, depth + 1)).collect::<Result<_>>()?),
+            Obj::Tuple(items) => {
+                Key::Tuple(items.iter().map(|&i| self.key(i, depth + 1, budget)).collect::<Result<_>>()?)
+            }
             Obj::Global { path, .. } => Key::Global(path.clone()),
             _ => bail!("a {} as a dict key", self.kind(id)),
         })
@@ -854,7 +873,7 @@ impl Machine<'_> {
         match role {
             Role::OrderedDict => {
                 ensure!(matches!(&self.objs[args], Obj::Tuple(a) if a.is_empty()), "OrderedDict with arguments");
-                Ok(Obj::Dict(DictObj { entries: Vec::new(), keys: HashSet::new() }))
+                Ok(DictObj::empty(true))
             }
             Role::RebuildTensorV2 => self.rebuild_tensor(args).map(Obj::Tensor),
             Role::RebuildParameter => self.rebuild_parameter(args).map(Obj::Tensor),
@@ -866,7 +885,7 @@ impl Machine<'_> {
         let Obj::Global { role, path } = &self.objs[class] else { bail!("NEWOBJ on a {}", self.kind(class)) };
         match role {
             // `OrderedDict.__new__` ignores its arguments; NEWOBJ does not call `__init__`
-            Role::OrderedDict => Ok(Obj::Dict(DictObj { entries: Vec::new(), keys: HashSet::new() })),
+            Role::OrderedDict => Ok(DictObj::empty(true)),
             Role::Storage(_) | Role::Inert => Ok(self.inert(class, args)),
             Role::RebuildTensorV2 | Role::RebuildParameter => bail!("NEWOBJ on the function {path}"),
         }
@@ -1163,6 +1182,14 @@ mod tests {
         shared.extend(std::iter::repeat_n(*b"h\x00", 255).flatten());
         shared.extend(b"l.");
         assert!(format!("{:?}", unpickle(&shared, &storage_of(0)).err()).contains("bytes of strings"));
+
+        // the same as one dict key, a tuple of the string 256 times, in a dict that is popped and never returned
+        let mut key = b"\x80\x02}(X\x00\x00\x10\x00".to_vec();
+        key.extend(std::iter::repeat_n(b'a', 1 << 20));
+        key.extend(b"q\x00");
+        key.extend(std::iter::repeat_n(*b"h\x00", 255).flatten());
+        key.extend(b"tK\x01s0N.");
+        assert!(format!("{:?}", unpickle(&key, &storage_of(0)).err()).contains("bytes of strings"));
     }
 
     #[test]
@@ -1180,6 +1207,10 @@ mod tests {
             &storage_of(0),
         )?;
         assert_eq!(value, Value::Dict(vec![(Value::Str("a".into()), Value::Int(1))]));
+
+        // a plain dict has no attributes to set, as in Python
+        let plain = unpickle(b"\x80\x02}X\x01\x00\x00\x00aK\x01s}X\x01\x00\x00\x00xK\x01sb.", &storage_of(0));
+        assert!(format!("{:?}", plain.err()).contains("plain dict"));
         Ok(())
     }
 }
