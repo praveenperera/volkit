@@ -69,8 +69,10 @@ pub struct LoadReport {
     /// Each conv plan with the time cuDNN measured for it, `shape | ALGO MATH ws N B, T ms`
     pub plans: Vec<String>,
     /// (new) The algorithm choices without timings, `shape | ALGO MATH ws N B`: each distinct conv in forward
-    /// order, then the float32 seg head (none for the bf16 head). Two loads chose the same algorithms, and so
-    /// round the same way, exactly when these lists are equal
+    /// order, then the float32 seg head (none for the bf16 head). Two loads chose the same cuDNN algorithms
+    /// exactly when these lists are equal. That covers the cuDNN choice only: compare `cudnn` and `cublas` too,
+    /// since another cuDNN or cuBLAS release can round the same choices differently (the decoder's GEMMs run on
+    /// cuBLAS)
     pub algos: Vec<String>,
     pub head_plan: String,
     pub head_channels: usize,

@@ -131,7 +131,8 @@ impl Export {
     /// metadata map in random order; written this way the file matches the Python exporter's byte for byte. Both
     /// files are written in full under temporary names before either is renamed into place, so a failed write
     /// leaves an existing export as it was. The two renames are not one atomic step: if the sidecar's rename fails
-    /// after the weights', the new weights sit beside the old sidecar, and the error says so
+    /// after the weights', the new weights are in place and the sidecar's path holds whatever it held before (the
+    /// old sidecar, or nothing on a first export), and the error says so
     pub fn write(&self, path: &Path) -> Result<()> {
         let mut sorted: Vec<&Tensor> = self.tensors.iter().collect();
         // safetensors orders tensors by descending dtype alignment, then by name; all are float32 here
@@ -176,7 +177,10 @@ impl Export {
         self.sidecar.serialize(&mut serde_json::Serializer::with_formatter(&mut json, formatter))?;
         let sidecar = Partial::write(&path.with_extension("json"), |w| Ok(w.write_all(&json)?))?;
         weights.commit()?;
-        sidecar.commit().wrap_err("the new weights are in place beside the old sidecar")
+        let sidecar_path = sidecar.path.clone();
+        sidecar.commit().wrap_err_with(|| {
+            format!("the new weights are in place, but the new sidecar is not at {}", sidecar_path.display())
+        })
     }
 
     /// The unique tensors (name -> (shape, float32 data)) and aliases (alias -> target), for an in-memory load
@@ -380,11 +384,13 @@ fn configuration<'a>(plans: &'a Value, name: &str) -> Result<&'a Value> {
     plans.get("configurations").and_then(|c| c.get(name)).ok_or_else(|| eyre!("plans have no configuration {name}"))
 }
 
-/// A configuration's `architecture` section, refused as unsupported unless it is a [`ARCH`]
+/// A configuration's `architecture` section, refused as unsupported unless it names [`ARCH`]; a class name that
+/// is missing or not a string is a malformed plan, not another network
 fn architecture(config: &Value) -> Result<&Value> {
     let arch = config.get("architecture").ok_or_else(|| eyre!("configuration has no architecture"))?;
-    let class = arch.get("network_class_name").and_then(Value::as_str);
-    ensure_supported!(class == Some(ARCH), "unsupported: network {class:?}, only {ARCH}");
+    let class = arch.get("network_class_name").ok_or_else(|| eyre!("architecture has no network_class_name"))?;
+    let class = class.as_str().ok_or_else(|| eyre!("network_class_name {class} is not a string"))?;
+    ensure_supported!(class == ARCH, "unsupported: network {class}, only {ARCH}");
     Ok(arch)
 }
 
@@ -426,12 +432,12 @@ fn afv_v2_recipe(plans: &Value, config: &Value, dataset: &Value) -> Result<Value
 #[derive(Deserialize)]
 struct ArchKwargs {
     n_stages: usize,
-    features_per_stage: Vec<usize>,
+    features_per_stage: PerStage<usize>,
     conv_op: String,
-    kernel_sizes: Vec<[usize; 3]>,
-    strides: Vec<[usize; 3]>,
-    n_blocks_per_stage: Vec<usize>,
-    n_conv_per_stage_decoder: Vec<usize>,
+    kernel_sizes: PerStage<Cube>,
+    strides: PerStage<Cube>,
+    n_blocks_per_stage: PerStage<usize>,
+    n_conv_per_stage_decoder: PerStage<usize>,
     conv_bias: bool,
     norm_op: String,
     norm_op_kwargs: Option<NormKwargs>,
@@ -443,6 +449,49 @@ struct ArchKwargs {
     nonlin_kwargs: Option<NonlinKwargs>,
     #[serde(flatten)]
     other: Map<String, Value>,
+}
+
+/// A per-stage list, or one integer for every stage: the network expands an `int` (`isinstance(x, int)`) to `[x] *
+/// n` entries and takes any list as it is (dynamic_network_architectures `ResidualEncoder` and
+/// `ResidualEncoderUNet`)
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PerStage<T> {
+    All(usize),
+    Each(Vec<T>),
+}
+
+impl<T: From<usize> + Clone> PerStage<T> {
+    fn expand(self, n: usize) -> Vec<T> {
+        match self {
+            Self::All(v) => vec![T::from(v); n],
+            Self::Each(list) => list,
+        }
+    }
+}
+
+/// A kernel size or stride: one integer for all three axes, as `maybe_convert_scalar_to_list` expands it for
+/// Conv3d, or one per axis
+#[derive(Clone, Copy, Deserialize)]
+#[serde(untagged)]
+enum Cube {
+    All(usize),
+    Each([usize; 3]),
+}
+
+impl From<usize> for Cube {
+    fn from(v: usize) -> Self {
+        Self::All(v)
+    }
+}
+
+impl Cube {
+    fn axes(self) -> [usize; 3] {
+        match self {
+            Self::All(v) => [v; 3],
+            Self::Each(axes) => axes,
+        }
+    }
 }
 
 /// InstanceNorm3d's arguments, with torch's defaults
@@ -590,23 +639,28 @@ impl Network {
 
         let n = kw.n_stages;
         ensure_supported!(n >= 2, "unsupported: {n} stages");
-        let per_stage =
-            [kw.features_per_stage.len(), kw.kernel_sizes.len(), kw.strides.len(), kw.n_blocks_per_stage.len()];
+        // bounds the expansion of a scalar argument below; nnU-Net plans have at most about eight
+        ensure!(n <= 64, "{n} stages");
+        let f = kw.features_per_stage.expand(n);
+        let k: Vec<[usize; 3]> = kw.kernel_sizes.expand(n).into_iter().map(Cube::axes).collect();
+        let s: Vec<[usize; 3]> = kw.strides.expand(n).into_iter().map(Cube::axes).collect();
+        let n_blocks = kw.n_blocks_per_stage.expand(n);
+        let n_convs = kw.n_conv_per_stage_decoder.expand(n - 1);
+        let per_stage = [f.len(), k.len(), s.len(), n_blocks.len()];
         ensure!(per_stage.iter().all(|&len| len == n), "per-stage lists of lengths {per_stage:?} for {n} stages");
-        ensure!(kw.n_conv_per_stage_decoder.len() == n - 1, "n_conv_per_stage_decoder needs {} entries", n - 1);
-        let counts = kw.n_blocks_per_stage.iter().chain(&kw.n_conv_per_stage_decoder);
+        ensure!(n_convs.len() == n - 1, "n_conv_per_stage_decoder needs {} entries", n - 1);
+        let counts = n_blocks.iter().chain(&n_convs);
         ensure!(counts.copied().all(|c| c > 0), "a stage without blocks or convs");
         ensure!(in_channels > 0 && num_classes > 0, "{in_channels} input channels, {num_classes} classes");
 
         let mut b = Builder { params: Vec::new(), eps: norm.eps, slope, bias: kw.conv_bias };
-        let (f, k, s) = (&kw.features_per_stage, &kw.kernel_sizes, &kw.strides);
         // ResidualEncoder: a one-conv stem at stage 0's width and kernel, stride 1, then the residual stages
         let stem = vec![b.unit("encoder.stem.convs.0", in_channels, f[0], k[0], [1; 3], UnitRole::Activated)?];
         let mut stages = Vec::with_capacity(n);
         let mut cin = f[0];
         for stage in 0..n {
-            let mut blocks = Vec::with_capacity(kw.n_blocks_per_stage[stage]);
-            for block in 0..kw.n_blocks_per_stage[stage] {
+            let mut blocks = Vec::with_capacity(n_blocks[stage]);
+            for block in 0..n_blocks[stage] {
                 let (block_in, stride) = if block == 0 { (cin, s[stage]) } else { (f[stage], [1; 3]) };
                 let prefix = format!("encoder.stages.{stage}.blocks.{block}");
                 blocks.push(b.block(&prefix, block_in, f[stage], k[stage], stride)?);
@@ -627,8 +681,8 @@ impl Network {
         let mut convs = Vec::with_capacity(n - 1);
         for d in 1..n {
             let skip = f[n - d - 1];
-            let mut stage = Vec::with_capacity(kw.n_conv_per_stage_decoder[d - 1]);
-            for c in 0..kw.n_conv_per_stage_decoder[d - 1] {
+            let mut stage = Vec::with_capacity(n_convs[d - 1]);
+            for c in 0..n_convs[d - 1] {
                 let conv_in = if c == 0 { 2 * skip } else { skip };
                 let prefix = format!("decoder.stages.{}.convs.{c}", d - 1);
                 stage.push(b.unit(&prefix, conv_in, skip, k[n - d - 1], [1; 3], UnitRole::Activated)?);
@@ -1002,12 +1056,63 @@ mod tests {
         let refused = arch(&broken).err().expect("string n_stages refused");
         assert!(!crate::error::is_unsupported(&refused), "{refused:?}");
 
+        // a class name that is not a string is a malformed plan
+        let mut numbered = plans.clone();
+        numbered["configurations"]["3d_fullres"]["architecture"]["network_class_name"] = json!(7);
+        let refused = architecture(&numbered["configurations"]["3d_fullres"]).expect_err("numeric class refused");
+        assert!(!crate::error::is_unsupported(&refused), "{refused:?}");
+
         // checked before any state dict name, which another network's checkpoint does not have
         let mut plain = plans.clone();
         plain["configurations"]["3d_fullres"]["architecture"]["network_class_name"] =
             json!("dynamic_network_architectures.architectures.unet.PlainConvUNet");
         let refused = architecture(&plain["configurations"]["3d_fullres"]).expect_err("PlainConvUNet refused");
         assert!(crate::error::is_unsupported(&refused), "{refused:?}");
+        Ok(())
+    }
+
+    /// dynamic_network_architectures expands an `int` per-stage argument to every stage and an `int` kernel or stride
+    /// to every axis, so plans written that way are the same network
+    #[test]
+    fn scalar_arch_kwargs_expand_as_upstream() -> Result<()> {
+        let plans = fixture("afv2.plans.json")?;
+        let program = |plans: &Value| -> Result<Value> {
+            let network = Network::from_plans(architecture(configuration(plans, "3d_fullres")?)?, 1, 4)?;
+            Ok(serde_json::to_value(&network.program)?)
+        };
+        let mut scalar = plans.clone();
+        let kwargs = &mut scalar["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"];
+        kwargs["n_conv_per_stage_decoder"] = json!(1);
+        kwargs["kernel_sizes"] = json!(3);
+        kwargs["strides"] = json!([1, 2, 2, 2, 2, 2, [2, 2, 1]]);
+        assert_eq!(program(&scalar)?, program(&plans)?);
+
+        // the encoder's twin: two blocks in every stage
+        let mut blocks = plans.clone();
+        blocks["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"]["n_blocks_per_stage"] = json!(2);
+        let network = Network::from_plans(architecture(configuration(&blocks, "3d_fullres")?)?, 1, 4)?;
+        let has = |prefix: &str| network.params.iter().any(|p| p.name.starts_with(prefix));
+        assert!(has("encoder.stages.0.blocks.1.") && has("encoder.stages.6.blocks.1."));
+        assert!(!has("encoder.stages.3.blocks.2."));
+        Ok(())
+    }
+
+    /// On a first export, a sidecar rename that fails after the weights' says the weights are in place and the
+    /// sidecar is not, without naming an old sidecar that never existed
+    #[test]
+    fn a_blocked_sidecar_rename_says_what_is_in_place() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("volkit-export-rename-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("model.safetensors");
+        // a directory at the sidecar's path takes no file renamed over it
+        fs::create_dir_all(dir.join("model.json"))?;
+
+        let export = Export { sidecar: json!({}), tensors: Vec::new(), aliases: Vec::new() };
+        let err = export.write(&path).expect_err("sidecar rename refused");
+        assert!(format!("{err:#}").contains("the new weights are in place, but the new sidecar is not at"), "{err:#}");
+        assert!(path.is_file());
+        assert!(!dir.join("model.json.partial").exists());
+        fs::remove_dir_all(&dir)?;
         Ok(())
     }
 

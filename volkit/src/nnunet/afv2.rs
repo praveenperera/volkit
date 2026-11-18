@@ -106,8 +106,10 @@ pub struct LoadReport {
     /// The cuDNN algorithm chosen for each distinct convolution, in forward order (stem, encoder, decoder), then
     /// the float32 seg head's (the bf16 head is a kernel of volkit's own and adds none). Each entry is
     /// `shape | ALGO MATH ws N B`, with ` nondeterministic` or ` (unsupported)` appended where they apply, and
-    /// carries no timing, so two loads chose the same algorithms (and so round the same way) exactly when their
-    /// lists are equal
+    /// carries no timing, so two loads chose the same cuDNN algorithms exactly when their lists are equal. It covers
+    /// the cuDNN choice only: the same choices under another cuDNN or cuBLAS release can still round differently
+    /// (the decoder's GEMMs run on cuBLAS), so a caller deciding whether two loads compute the same bits compares
+    /// [`cudnn`](Self::cudnn) and [`cublas`](Self::cublas) too
     pub algos: Vec<String>,
     /// The seg head's cuDNN plan (fp32) or kernel (bf16), and the output channels it runs (4, or padded to 8 on
     /// cuDNN)
