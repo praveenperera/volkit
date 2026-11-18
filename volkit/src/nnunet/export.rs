@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::ensure_supported;
+use crate::error::Unsupported;
 use crate::pth::{Pth, TensorRef, Value as PyValue};
 use crate::weights::Tensors;
 
@@ -66,7 +68,7 @@ impl Export {
 
         let labels =
             dataset.get("labels").and_then(Value::as_object).ok_or_else(|| eyre!("dataset.json has no labels"))?;
-        ensure!(!labels.values().any(Value::is_array), "unsupported: region-based labels");
+        ensure_supported!(!labels.values().any(Value::is_array), "unsupported: region-based labels");
         // nnU-Net's LabelManager: one output per label, minus the ignore label
         let num_classes = labels.len() - usize::from(labels.contains_key("ignore"));
         let declared_channels = match dataset.get("channel_names") {
@@ -125,7 +127,8 @@ impl Export {
     ///
     /// The safetensors header is written here rather than by the `safetensors` crate, which serialises its
     /// metadata map in random order; written this way the file matches the Python exporter's byte for byte. Both
-    /// files go to a temporary name first, so a failed write leaves no partial export behind
+    /// files are written in full under temporary names before either is renamed into place, so a failed write
+    /// leaves an existing export as it was
     pub fn write(&self, path: &Path) -> Result<()> {
         let mut sorted: Vec<&Tensor> = self.tensors.iter().collect();
         // safetensors orders tensors by descending dtype alignment, then by name; all are float32 here
@@ -150,7 +153,7 @@ impl Export {
             header.push(' ');
         }
 
-        write_atomic(path, |w| {
+        let weights = Partial::write(path, |w| {
             w.write_all(&(header.len() as u64).to_le_bytes())?;
             w.write_all(header.as_bytes())?;
             let mut buf = Vec::with_capacity(1 << 16);
@@ -168,7 +171,9 @@ impl Export {
         let mut json = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
         self.sidecar.serialize(&mut serde_json::Serializer::with_formatter(&mut json, formatter))?;
-        write_atomic(&path.with_extension("json"), |w| Ok(w.write_all(&json)?))
+        let sidecar = Partial::write(&path.with_extension("json"), |w| Ok(w.write_all(&json)?))?;
+        weights.commit()?;
+        sidecar.commit()
     }
 
     /// The unique tensors (name -> (shape, float32 data)) and aliases (alias -> target), for an in-memory load
@@ -225,14 +230,35 @@ fn sha256(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn write_atomic(path: &Path, write: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".partial");
-    let tmp = PathBuf::from(tmp);
-    let file = File::create(&tmp).wrap_err_with(|| format!("creating {}", tmp.display()))?;
-    let mut w = BufWriter::new(file);
-    write(&mut w).and_then(|()| Ok(w.flush()?)).wrap_err_with(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).wrap_err_with(|| format!("renaming {} to {}", tmp.display(), path.display()))
+/// A file written in full under `<path>.partial`, renamed to `path` by [`Partial::commit`] or removed when dropped
+/// uncommitted
+struct Partial {
+    tmp: PathBuf,
+    path: PathBuf,
+}
+
+impl Partial {
+    fn write(path: &Path, write: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<Self> {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".partial");
+        let partial = Self { tmp: PathBuf::from(tmp), path: path.to_path_buf() };
+        let file = File::create(&partial.tmp).wrap_err_with(|| format!("creating {}", partial.tmp.display()))?;
+        let mut w = BufWriter::new(file);
+        write(&mut w).and_then(|()| Ok(w.flush()?)).wrap_err_with(|| format!("writing {}", partial.tmp.display()))?;
+        Ok(partial)
+    }
+
+    fn commit(self) -> Result<()> {
+        let renamed = fs::rename(&self.tmp, &self.path);
+        renamed.wrap_err_with(|| format!("renaming {} to {}", self.tmp.display(), self.path.display()))
+    }
+}
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        // after a commit the temporary name is gone and this finds nothing
+        let _ = fs::remove_file(&self.tmp);
+    }
 }
 
 /// Python's `json.dumps` of a str -> str dict with its defaults: `", "` and `": "` separators, ASCII only
@@ -302,7 +328,10 @@ impl Source {
             })
             .collect::<Result<Vec<_>>>()?;
         if let Some((name, _)) = state.iter().find(|(name, _)| name.starts_with("base.")) {
-            bail!("unsupported: {name}: a `base.`-wrapped network (HercUNet) is not an AFV v2 checkpoint");
+            return Err(Unsupported(format!(
+                "unsupported: {name}: a `base.`-wrapped network (HercUNet) is not an AFV v2 checkpoint"
+            ))
+            .into());
         }
 
         let auxiliary = match payload.get("auxiliary_weights") {
@@ -356,14 +385,17 @@ fn patch_size(config: &Value) -> Result<[usize; 3]> {
 fn afv_v2_recipe(plans: &Value, config: &Value, dataset: &Value) -> Result<Value> {
     let want = json!({"background": 0, "vt-fiber": 1, "hz-fiber": 2, "intersection": 3});
     let labels = dataset.get("labels");
-    ensure!(labels == Some(&want), "unsupported: afv-v2 recipe needs the classes {want}, the dataset gives {labels:?}");
+    ensure_supported!(
+        labels == Some(&want),
+        "unsupported: afv-v2 recipe needs the classes {want}, the dataset gives {labels:?}"
+    );
     let schemes = config.get("normalization_schemes").cloned().unwrap_or(json!([]));
-    ensure!(
+    ensure_supported!(
         schemes == json!(["ZScoreNormalization"]),
         "unsupported: afv-v2 needs ZScoreNormalization, plans give {schemes}"
     );
     let transpose = plans.get("transpose_forward");
-    ensure!(
+    ensure_supported!(
         transpose == Some(&json!([0, 1, 2])),
         "unsupported: afv-v2 needs no axis transposition, plans give {transpose:?}"
     );
@@ -519,20 +551,21 @@ impl Network {
         let arch =
             configuration(plans, configuration_name)?.get("architecture").ok_or_else(|| eyre!("no architecture"))?;
         let class = arch.get("network_class_name").and_then(Value::as_str);
-        ensure!(class == Some(ARCH), "unsupported: network {class:?}, only {ARCH}");
+        ensure_supported!(class == Some(ARCH), "unsupported: network {class:?}, only {ARCH}");
         let kwargs = arch.get("arch_kwargs").cloned().ok_or_else(|| eyre!("no arch_kwargs"))?;
-        let kw: ArchKwargs = serde_json::from_value(kwargs).wrap_err("unsupported arch_kwargs")?;
+        let kw: ArchKwargs =
+            serde_json::from_value(kwargs).map_err(|e| Unsupported(format!("unsupported arch_kwargs: {e}")))?;
 
-        ensure!(CONV_OPS.contains(&kw.conv_op.as_str()), "unsupported: conv_op {}", kw.conv_op);
-        ensure!(NORM_OPS.contains(&kw.norm_op.as_str()), "unsupported: norm_op {}", kw.norm_op);
-        ensure!(NONLINS.contains(&kw.nonlin.as_str()), "unsupported: nonlin {}", kw.nonlin);
-        ensure!(kw.dropout_op.is_none(), "unsupported: dropout {:?}", kw.dropout_op);
+        ensure_supported!(CONV_OPS.contains(&kw.conv_op.as_str()), "unsupported: conv_op {}", kw.conv_op);
+        ensure_supported!(NORM_OPS.contains(&kw.norm_op.as_str()), "unsupported: norm_op {}", kw.norm_op);
+        ensure_supported!(NONLINS.contains(&kw.nonlin.as_str()), "unsupported: nonlin {}", kw.nonlin);
+        ensure_supported!(kw.dropout_op.is_none(), "unsupported: dropout {:?}", kw.dropout_op);
         let norm = kw.norm_op_kwargs.unwrap_or_default();
-        ensure!(norm.affine, "unsupported: InstanceNorm3d without affine");
+        ensure_supported!(norm.affine, "unsupported: InstanceNorm3d without affine");
         let slope = kw.nonlin_kwargs.map_or(default_slope(), |k| k.negative_slope);
 
         let n = kw.n_stages;
-        ensure!(n >= 2, "unsupported: {n} stages");
+        ensure_supported!(n >= 2, "unsupported: {n} stages");
         let per_stage =
             [kw.features_per_stage.len(), kw.kernel_sizes.len(), kw.strides.len(), kw.n_blocks_per_stage.len()];
         ensure!(per_stage.iter().all(|&len| len == n), "per-stage lists of lengths {per_stage:?} for {n} stages");
@@ -789,8 +822,14 @@ impl Builder {
         stride: [usize; 3],
         bias: bool,
     ) -> Result<Conv> {
-        ensure!(kernel.iter().all(|k| k % 2 == 1), "unsupported: {prefix}: kernel {kernel:?}, odd kernels only");
-        ensure!(stride.iter().all(|s| (1..=2).contains(s)), "unsupported: {prefix}: stride {stride:?}, 1 or 2 only");
+        ensure_supported!(
+            kernel.iter().all(|k| k % 2 == 1),
+            "unsupported: {prefix}: kernel {kernel:?}, odd kernels only"
+        );
+        ensure_supported!(
+            stride.iter().all(|s| (1..=2).contains(s)),
+            "unsupported: {prefix}: stride {stride:?}, 1 or 2 only"
+        );
         let w = format!("{prefix}.weight");
         self.param(w.clone(), [cout, cin].into_iter().chain(kernel).collect());
         let b = bias.then(|| format!("{prefix}.bias"));
@@ -803,8 +842,11 @@ impl Builder {
 
     /// A ConvTranspose3d with kernel = stride, the decoder's upsampling; its weight is (Cin, Cout, kernel)
     fn transposed(&mut self, prefix: &str, cin: usize, cout: usize, stride: [usize; 3]) -> Result<Conv> {
-        ensure!(stride.iter().all(|s| (1..=2).contains(s)), "unsupported: {prefix}: stride {stride:?}, 1 or 2 only");
-        ensure!(self.bias, "unsupported: {prefix}: transposed conv without bias");
+        ensure_supported!(
+            stride.iter().all(|s| (1..=2).contains(s)),
+            "unsupported: {prefix}: stride {stride:?}, 1 or 2 only"
+        );
+        ensure_supported!(self.bias, "unsupported: {prefix}: transposed conv without bias");
         let w = format!("{prefix}.weight");
         let b = format!("{prefix}.bias");
         self.param(w.clone(), [cin, cout].into_iter().chain(stride).collect());
@@ -905,6 +947,42 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    /// A model outside the afv-v2 recipe is unsupported, the fallback case, not a failure
+    #[test]
+    fn other_models_are_unsupported() -> Result<()> {
+        let plans = fixture("afv2.plans.json")?;
+        let config = &plans["configurations"]["3d_fullres"];
+        let dataset = json!({"labels": {"background": 0, "ink": 1}});
+        let refused = afv_v2_recipe(&plans, config, &dataset).expect_err("other labels refused");
+        assert!(crate::error::is_unsupported(&refused), "{refused:?}");
+
+        let mut wide = plans.clone();
+        wide["configurations"]["3d_fullres"]["architecture"]["arch_kwargs"]["dropout_op"] = json!("torch.nn.Dropout3d");
+        let refused = Network::from_plans(&wide, "3d_fullres", 1, 4).err().expect("dropout refused");
+        assert!(crate::error::is_unsupported(&refused), "{refused:?}");
+        Ok(())
+    }
+
+    /// Neither file of an existing export changes when writing the new one fails partway
+    #[test]
+    fn a_failed_write_keeps_the_existing_export() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("volkit-export-write-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("model.safetensors");
+        fs::write(&path, b"old weights")?;
+        fs::write(dir.join("model.json"), b"old sidecar")?;
+        // a directory where the sidecar's temporary file would go makes its write fail
+        fs::create_dir_all(dir.join("model.json.partial"))?;
+
+        let export = Export { sidecar: json!({}), tensors: Vec::new(), aliases: Vec::new() };
+        assert!(export.write(&path).is_err());
+        assert_eq!(fs::read(&path)?, b"old weights");
+        assert_eq!(fs::read(dir.join("model.json"))?, b"old sidecar");
+        assert!(!dir.join("model.safetensors.partial").exists());
+        fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
