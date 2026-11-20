@@ -25,6 +25,9 @@ include = [
 ]
 
 [dependencies]
+# `Pod` bounds the GPU downloads, which fill uninitialised memory with device bytes; the version half already
+# brings into the tree
+bytemuck = "1"
 color-eyre = "0.6"
 half = { version = "2", features = ["bytemuck"] }
 memmap2 = "0.9"
