@@ -566,8 +566,8 @@ impl AfvV2 {
 
     /// [`Self::finish`], downloading the outputs into `semantic`'s and `tracing`'s allocations, whatever they held,
     /// so a caller that hands back each finished column's two vectors allocates them about once per run instead of
-    /// once per column (about 520 MB a column at nz 1000). Empty vectors reuse nothing; vectors the column does not
-    /// quantize into are dropped
+    /// once per column (about 520 MB a column at nz 1000). A vector without room for its output is replaced by one
+    /// sized exactly to it, and vectors the column does not quantize into are dropped
     pub fn finish_into(&mut self, quantize: bool, mut semantic: Vec<u8>, mut tracing: Vec<u8>) -> Result<ColumnOut> {
         self.gpu.inner.context().bind_to_thread()?;
         let col = self.col.take().ok_or_else(|| eyre!("finish before begin"))?;

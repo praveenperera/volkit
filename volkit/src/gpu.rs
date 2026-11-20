@@ -283,18 +283,24 @@ impl Gpu {
 
     /// Copies `len` elements of `T` starting `offset` elements in to `out`, replacing what it held, synchronously
     ///
-    /// The copy lands in `out`'s allocation without zeroing it first, and the allocation is kept when it already
-    /// holds `len` elements, so a caller that passes the same vector back for each download allocates once. On an
-    /// error `out` is left empty
+    /// The copy lands in `out`'s allocation without zeroing it first. The allocation is kept when it has room for
+    /// `len` elements and is otherwise replaced by one of exactly `len`, so a caller that passes the same vector
+    /// back for each download allocates once. On an error `out` is left empty
     pub fn download_range_into<T: Pod>(&self, buf: &Buf, offset: usize, len: usize, out: &mut Vec<T>) -> Result<()> {
+        out.clear();
         let end = offset.checked_add(len).and_then(|end| end.checked_mul(size_of::<T>()));
         ensure!(end.is_some_and(|end| end <= buf.bytes), "download past the end of a {}-byte buffer", buf.bytes);
-        out.clear();
         if len == 0 {
             return Ok(());
         }
 
-        out.reserve(len);
+        // replaced rather than grown: growing copies bytes the download overwrites, holds both allocations at
+        // once, and may round up to twice the old capacity
+        if out.capacity() < len {
+            *out = Vec::new();
+            out.reserve_exact(len);
+        }
+
         let dst = &mut out.spare_capacity_mut()[..len];
         // SAFETY: the source range is in bounds, `dst` is `len` elements of `out`'s allocation, and the
         // synchronize keeps that allocation alive and unmoved until the copy lands
