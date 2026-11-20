@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use bytemuck::Pod;
 use color_eyre::eyre::{Result, WrapErr, bail, ensure, eyre};
 use cudakit::{ComputeCapability, ExtraSymbols, Library, LibraryPolicy, Profile, PtxTier, TierSet};
 use cudarc::driver::CudaModule;
@@ -269,24 +270,42 @@ impl Gpu {
     }
 
     /// Copies `buf` back to a vector, synchronously
-    pub fn download<T: Copy + Default>(&self, buf: &Buf) -> Result<Vec<T>> {
+    pub fn download<T: Pod>(&self, buf: &Buf) -> Result<Vec<T>> {
         self.download_range(buf, 0, buf.bytes / size_of::<T>())
     }
 
     /// Copies `len` elements of `T` starting `offset` elements in, synchronously
-    pub fn download_range<T: Copy + Default>(&self, buf: &Buf, offset: usize, len: usize) -> Result<Vec<T>> {
-        let bytes = len * size_of::<T>();
-        ensure!(offset * size_of::<T>() + bytes <= buf.bytes, "download past the end of a {}-byte buffer", buf.bytes);
-        let mut out = vec![T::default(); len];
+    pub fn download_range<T: Pod>(&self, buf: &Buf, offset: usize, len: usize) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        self.download_range_into(buf, offset, len, &mut out)?;
+        Ok(out)
+    }
+
+    /// Copies `len` elements of `T` starting `offset` elements in to `out`, replacing what it held, synchronously
+    ///
+    /// The copy lands in `out`'s allocation without zeroing it first, and the allocation is kept when it already
+    /// holds `len` elements, so a caller that passes the same vector back for each download allocates once. On an
+    /// error `out` is left empty
+    pub fn download_range_into<T: Pod>(&self, buf: &Buf, offset: usize, len: usize, out: &mut Vec<T>) -> Result<()> {
+        let end = offset.checked_add(len).and_then(|end| end.checked_mul(size_of::<T>()));
+        ensure!(end.is_some_and(|end| end <= buf.bytes), "download past the end of a {}-byte buffer", buf.bytes);
+        out.clear();
         if len == 0 {
-            return Ok(out);
+            return Ok(());
         }
-        // SAFETY: in bounds, and the synchronize keeps `out` alive until the copy lands
+
+        out.reserve(len);
+        let dst = &mut out.spare_capacity_mut()[..len];
+        // SAFETY: the source range is in bounds, `dst` is `len` elements of `out`'s allocation, and the
+        // synchronize keeps that allocation alive and unmoved until the copy lands
         unsafe {
-            cur::memcpy_dtoh_async(&mut out, buf.ptr + (offset * size_of::<T>()) as u64, self.cu_stream())?;
+            cur::memcpy_dtoh_async(dst, buf.ptr + (offset * size_of::<T>()) as u64, self.cu_stream())?;
             cur::stream::synchronize(self.cu_stream())?;
         }
-        Ok(out)
+        // SAFETY: the synchronize returned, so the copy wrote all `len * size_of::<T>()` bytes of `dst`, and
+        // `T: Pod` makes any bytes a valid `T`
+        unsafe { out.set_len(len) };
+        Ok(())
     }
 
     /// Waits for every queued operation

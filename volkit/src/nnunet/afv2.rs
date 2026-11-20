@@ -561,6 +561,14 @@ impl AfvV2 {
     /// reference writes nothing for a column whose tiles were all air). Fails on a non-finite probability, as the
     /// reference's `quantize` does
     pub fn finish(&mut self, quantize: bool) -> Result<ColumnOut> {
+        self.finish_reusing(quantize, Vec::new(), Vec::new())
+    }
+
+    /// [`Self::finish`], downloading the outputs into `semantic`'s and `tracing`'s allocations, whatever they held,
+    /// so a caller that hands back each finished column's two vectors allocates them about once per run instead of
+    /// once per column (about 520 MB a column at nz 1000). Empty vectors reuse nothing; vectors the column does not
+    /// quantize into are dropped
+    pub fn finish_reusing(&mut self, quantize: bool, mut semantic: Vec<u8>, mut tracing: Vec<u8>) -> Result<ColumnOut> {
         self.gpu.inner.context().bind_to_thread()?;
         let col = self.col.take().ok_or_else(|| eyre!("finish before begin"))?;
         let shape = col.shape;
@@ -586,8 +594,8 @@ impl AfvV2 {
             return Ok(ColumnOut { shape, semantic: None, tracing: None, uncovered, tiles: col.tiles });
         }
         ensure!(status[0] & NONFINITE == 0, "non-finite probabilities");
-        let semantic = self.gpu.download_range::<u8>(sem, 0, 2 * n)?;
-        let tracing = self.gpu.download_range::<u8>(tra, 0, 2 * hn)?;
+        self.gpu.download_range_into(sem, 0, 2 * n, &mut semantic)?;
+        self.gpu.download_range_into(tra, 0, 2 * hn, &mut tracing)?;
         Ok(ColumnOut { shape, semantic: Some(semantic), tracing: Some(tracing), uncovered, tiles: col.tiles })
     }
 }
