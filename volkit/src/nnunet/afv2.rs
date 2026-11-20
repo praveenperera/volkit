@@ -561,14 +561,14 @@ impl AfvV2 {
     /// reference writes nothing for a column whose tiles were all air). Fails on a non-finite probability, as the
     /// reference's `quantize` does
     pub fn finish(&mut self, quantize: bool) -> Result<ColumnOut> {
-        self.finish_reusing(quantize, Vec::new(), Vec::new())
+        self.finish_into(quantize, Vec::new(), Vec::new())
     }
 
     /// [`Self::finish`], downloading the outputs into `semantic`'s and `tracing`'s allocations, whatever they held,
     /// so a caller that hands back each finished column's two vectors allocates them about once per run instead of
     /// once per column (about 520 MB a column at nz 1000). Empty vectors reuse nothing; vectors the column does not
     /// quantize into are dropped
-    pub fn finish_reusing(&mut self, quantize: bool, mut semantic: Vec<u8>, mut tracing: Vec<u8>) -> Result<ColumnOut> {
+    pub fn finish_into(&mut self, quantize: bool, mut semantic: Vec<u8>, mut tracing: Vec<u8>) -> Result<ColumnOut> {
         self.gpu.inner.context().bind_to_thread()?;
         let col = self.col.take().ok_or_else(|| eyre!("finish before begin"))?;
         let shape = col.shape;
