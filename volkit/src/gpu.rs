@@ -275,18 +275,24 @@ impl Gpu {
 
     /// Copies `len` elements of `T` starting `offset` elements in, synchronously
     pub fn download_range<T: Copy + Default>(&self, buf: &Buf, offset: usize, len: usize) -> Result<Vec<T>> {
-        let bytes = len * size_of::<T>();
-        ensure!(offset * size_of::<T>() + bytes <= buf.bytes, "download past the end of a {}-byte buffer", buf.bytes);
         let mut out = vec![T::default(); len];
-        if len == 0 {
-            return Ok(out);
+        self.download_range_into(buf, offset, &mut out)?;
+        Ok(out)
+    }
+
+    /// Copies `out.len()` elements of `T` starting `offset` elements in into `out`, synchronously
+    pub fn download_range_into<T: Copy>(&self, buf: &Buf, offset: usize, out: &mut [T]) -> Result<()> {
+        let bytes = size_of_val(out);
+        ensure!(offset * size_of::<T>() + bytes <= buf.bytes, "download past the end of a {}-byte buffer", buf.bytes);
+        if out.is_empty() {
+            return Ok(());
         }
         // SAFETY: in bounds, and the synchronize keeps `out` alive until the copy lands
         unsafe {
-            cur::memcpy_dtoh_async(&mut out, buf.ptr + (offset * size_of::<T>()) as u64, self.cu_stream())?;
+            cur::memcpy_dtoh_async(out, buf.ptr + (offset * size_of::<T>()) as u64, self.cu_stream())?;
             cur::stream::synchronize(self.cu_stream())?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Waits for every queued operation
