@@ -83,9 +83,19 @@ impl Precision {
 
     /// `values` rounded to the storage type, as the little-endian bytes the GPU holds
     pub fn encode(self, values: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(values.len() * self.size());
+        self.encode_into(values, &mut out);
+        out
+    }
+
+    /// [`Self::encode`], appended to `out`
+    pub(crate) fn encode_into(self, values: &[f32], out: &mut Vec<u8>) {
+        // reserved up front: a flat_map's size hint is empty, so growing by it would copy the buffer about
+        // log2(n) times
+        out.reserve(values.len() * self.size());
         match self.half() {
-            Some(h) => values.iter().flat_map(|&v| h.bits(v).to_le_bytes()).collect(),
-            None => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            Some(h) => out.extend(values.iter().flat_map(|&v| h.bits(v).to_le_bytes())),
+            None => out.extend(values.iter().flat_map(|v| v.to_le_bytes())),
         }
     }
 

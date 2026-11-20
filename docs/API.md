@@ -146,12 +146,18 @@ impl AfvV2 {
     /// Normalises the column by its weights and returns its outputs, or only its uncovered count when
     /// `quantize` is false. Fails on a non-finite probability, as the reference's `quantize` does
     pub fn finish(&mut self, quantize: bool) -> Result<ColumnOut>;
+    /// (new) `finish`, downloading the outputs into `semantic`'s and `tracing`'s allocations, whatever they held,
+    /// so a caller that hands back each finished column's two vectors allocates them about once per run instead of
+    /// once per column (about 520 MB a column at nz 1000). A vector without room for its output is replaced by one
+    /// sized exactly to it, and vectors the column does not quantize into are dropped
+    pub fn finish_into(&mut self, quantize: bool, semantic: Vec<u8>, tracing: Vec<u8>) -> Result<ColumnOut>;
 }
 ```
 
 The caller keeps the reference's (`lasagna/qualzz_inference.py`) tiling, reads and air skipping: 128^3 tiles on a
 lattice of stride 96 over the band padded by 16, grouped into columns. Per column: `begin`, then `add` with the
-column's non-air tiles in the reference's order, then `finish`. This is exactly the sequence `inkrs.AfvV2`'s Python
+column's non-air tiles in the reference's order, then `finish` (or `finish_into` with the last column's vectors, once
+the caller has written them). This is exactly the sequence `inkrs.AfvV2`'s Python
 layer drives; volkit has no tiler for it (`nnunet::grid` and `nnunet::engine` are the `vesuvius.predict` engine,
 which AFV v2 does not use, and stay in inkrs).
 

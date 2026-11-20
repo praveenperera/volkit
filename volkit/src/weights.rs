@@ -23,7 +23,8 @@ pub type Tensors = BTreeMap<String, (Vec<usize>, Vec<f32>)>;
 
 /// The exported tensors, all float32
 pub struct Checkpoint {
-    tensors: Tensors,
+    // a tensor's data moves out when it is taken, as each is taken once; its shape stays for the checks
+    tensors: RefCell<Tensors>,
     aliases: BTreeMap<String, String>,
     taken: RefCell<BTreeSet<String>>,
 }
@@ -40,7 +41,7 @@ impl Checkpoint {
             ensure!(tensors.contains_key(target), "alias {alias} points at missing {target}");
             ensure!(!tensors.contains_key(alias), "alias {alias} is also a tensor");
         }
-        Ok(Self { tensors, aliases, taken: RefCell::new(BTreeSet::new()) })
+        Ok(Self { tensors: RefCell::new(tensors), aliases, taken: RefCell::new(BTreeSet::new()) })
     }
 
     /// Loads `path` (`.safetensors`) and its `.json` sidecar with no model contract: every tensor
@@ -97,13 +98,15 @@ impl Checkpoint {
     }
 
     fn keys(&self) -> BTreeMap<String, Vec<usize>> {
-        self.tensors.iter().map(|(k, (s, _))| (k.clone(), s.clone())).collect()
+        self.tensors.borrow().iter().map(|(k, (s, _))| (k.clone(), s.clone())).collect()
     }
 
-    /// The tensor `key`, which must have `shape` and not have been taken before
+    /// The tensor `key`, which must have `shape` and not have been taken before. Its data moves out of the
+    /// checkpoint rather than being copied
     pub fn take(&self, key: &str, shape: &[usize]) -> Result<Vec<f32>> {
+        let mut tensors = self.tensors.borrow_mut();
         // a missing or reshaped tensor means another architecture than the one this engine builds
-        let Some((have, data)) = self.tensors.get(key) else {
+        let Some((have, data)) = tensors.get_mut(key) else {
             return Err(Unsupported(format!(
                 "checkpoint has no tensor {key}; another architecture than the program's"
             ))
@@ -111,15 +114,16 @@ impl Checkpoint {
         };
         ensure_supported!(have == shape, "{key}: shape {have:?}, the model needs {shape:?}");
         ensure!(self.taken.borrow_mut().insert(key.to_owned()), "{key} taken twice");
-        Ok(data.clone())
+        Ok(std::mem::take(data))
     }
 
     /// Fails unless every tensor was taken; returns (tensors, aliases, parameters)
     pub fn finish(&self) -> Result<(usize, usize, usize)> {
-        let taken = self.taken.borrow();
-        let unused: Vec<&String> = self.tensors.keys().filter(|k| !taken.contains(*k)).collect();
+        let (tensors, taken) = (self.tensors.borrow(), self.taken.borrow());
+        let unused: Vec<&String> = tensors.keys().filter(|k| !taken.contains(*k)).collect();
         ensure_supported!(unused.is_empty(), "{} checkpoint tensors unused by the model: {unused:?}", unused.len());
-        let params = self.tensors.values().map(|(_, d)| d.len()).sum();
-        Ok((self.tensors.len(), self.aliases.len(), params))
+        // counted from the shapes, since the taken tensors' data has moved out; `from_parts` checked they agree
+        let params = tensors.values().map(|(s, _)| s.iter().product::<usize>()).sum();
+        Ok((tensors.len(), self.aliases.len(), params))
     }
 }
