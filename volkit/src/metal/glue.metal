@@ -59,37 +59,60 @@ kernel void stem(device float* p_y [[buffer(0)]], device const uchar* p_tile [[b
 
 // ---------------------------------------------------------------- InstanceNorm
 
-// Welford partial statistics of one chunk of rows of a [d, h, w, c] activation (padded layout, or plain), every
-// channel: partial[chunk, ch] = (n, mean, m2). Grid (chunks, channel groups of cpg), cpg * lanes threads: thread t
-// owns channel group_base + t % cpg and rows chunk_start + t / cpg, stepping by `lanes`; lane 0 then merges the
-// lanes in order, as u3f_partial does
-kernel void in_partial(device float4* p_part [[buffer(0)]], device const float* p_x [[buffer(1)]],
+// Welford partial statistics of one chunk of lines (z, y) of a [d, h, w, c] activation (padded layout, or plain when
+// `padded` is 0), four channels a thread: partial[chunk, ch] = (n, mean, m2). Grid (chunks, ceil(c / 4 / qpg)),
+// qpg * lanes threads: thread t owns channel quad g qpg + t % qpg and voxels x = t / qpg, + lanes, ... of each of the
+// chunk's lines, so a line's quads load as consecutive float4s; lane 0 then merges the lanes in order. The four
+// channels share the count, so a voxel costs one reciprocal. c must be a multiple of 4
+kernel void in_partial(device float4* p_part [[buffer(0)]], device const float4* p_x [[buffer(1)]],
                        constant uint& d [[buffer(2)]], constant uint& h [[buffer(3)]], constant uint& w [[buffer(4)]],
                        constant uint& c [[buffer(5)]], constant uint& padded [[buffer(6)]],
-                       constant uint& chunk_rows [[buffer(7)]], constant uint& cpg [[buffer(8)]],
+                       constant uint& chunk_lines [[buffer(7)]], constant uint& qpg [[buffer(8)]],
                        constant uint& lanes [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]],
                        uint tid [[thread_index_in_threadgroup]]) {
-    threadgroup float3 acc[256];
-    uint chunk = tg.x;
-    uint ch = tg.y * cpg + tid % cpg, lane = tid / cpg;
-    uint rows = d * h * w;
-    uint end = min((chunk + 1) * chunk_rows, rows);
-    float3 st = float3(0.0f);
-    if (ch < c) {
-        for (uint r = chunk * chunk_rows + lane; r < end; r += lanes) {
-            float v = p_x[(ulong)layout_row(r, h, w, padded) * c + ch];
-            st.x += 1.0f;
-            float dlt = v - st.y;
-            st.y += dlt / st.x;
-            st.z += dlt * (v - st.y);
+    threadgroup float sn[256];
+    threadgroup float4 smean[256];
+    threadgroup float4 sm2[256];
+    uint cq = c / 4;
+    uint q = tg.y * qpg + tid % qpg, lane = tid / qpg;
+    uint l0 = tg.x * chunk_lines, l1 = min(l0 + chunk_lines, d * h);
+    float n = 0.0f;
+    float4 mean = float4(0.0f), m2 = float4(0.0f);
+    if (q < cq) {
+        for (uint l = l0; l < l1; l++) {
+            ulong base = padded ? (ulong)prow(l / h, l % h, 0, h, w) : (ulong)l * w;
+            for (uint x = lane; x < w; x += lanes) {
+                float4 v = p_x[(base + x) * cq + q];
+                n += 1.0f;
+                float inv = 1.0f / n;
+                float4 dlt = v - mean;
+                mean += dlt * inv;
+                m2 += dlt * (v - mean);
+            }
         }
     }
-    acc[tid] = st;
+    sn[tid] = n;
+    smean[tid] = mean;
+    sm2[tid] = m2;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0 && ch < c) {
-        for (uint l = 1; l < lanes; l++) st = chan(st, acc[l * cpg + tid]);
-        p_part[(ulong)chunk * c + ch] = float4(st, 0.0f);
+    if (lane != 0 || q >= cq) return;
+    for (uint l = 1; l < lanes; l++) {
+        uint o = l * qpg + tid;
+        float nb = sn[o];
+        if (nb == 0.0f) continue;
+        if (n == 0.0f) {
+            n = nb, mean = smean[o], m2 = sm2[o];
+            continue;
+        }
+        float nn = n + nb;
+        float wgt = nb / nn;
+        float4 e = smean[o] - mean;
+        mean = mean + e * wgt;
+        m2 = m2 + sm2[o] + e * e * n * wgt;
+        n = nn;
     }
+    ulong out = (ulong)tg.x * c + 4 * q;
+    for (uint k = 0; k < 4; k++) p_part[out + k] = float4(n, mean[k], m2[k], 0.0f);
 }
 
 // Per channel (mean, invstd) from in_partial's chunks: thread t merges chunks t, t + 256, ... in order, then a fixed

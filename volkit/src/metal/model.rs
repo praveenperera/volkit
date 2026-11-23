@@ -105,20 +105,29 @@ impl Conv {
 }
 
 /// The levels whose stride-1 3x3x3 convs run Winograd: `VOLKIT_METAL_WINOGRAD`, a comma-separated level list or
-/// `none`, defaulting to 1 and 2. Level 0 never does: one of its buffers is the Winograd scratch
+/// `none`, defaulting to 0, 1 and 2. Level 0 takes its scratch from level 1, so it needs a second level. Level 3
+/// stays direct by default: its transformed weights would take about 680 MB
 fn winograd_levels() -> Result<Vec<usize>> {
-    let spec = std::env::var("VOLKIT_METAL_WINOGRAD").unwrap_or_else(|_| "1,2".into());
+    let spec = std::env::var("VOLKIT_METAL_WINOGRAD").unwrap_or_else(|_| "0,1,2".into());
     if spec == "none" {
         return Ok(Vec::new());
     }
-    let levels: Vec<usize> = spec
-        .split(',')
+    spec.split(',')
         .map(|v| {
             v.trim().parse().map_err(|_| color_eyre::eyre::eyre!("VOLKIT_METAL_WINOGRAD={spec:?}: levels or none"))
         })
-        .collect::<Result<_>>()?;
-    ensure!(!levels.contains(&0), "VOLKIT_METAL_WINOGRAD: level 0 holds the Winograd scratch and cannot run it");
-    Ok(levels)
+        .collect()
+}
+
+/// The most tiles one level-0 Winograd chunk takes: `VOLKIT_METAL_WINO_TILES`, 0 for as many as the scratch holds,
+/// default 256. Level 0's chunks of 256 tiles keep V and M (7 MB each) in the system-level cache. The wider levels
+/// run uncapped: each chunk re-reads all of U (up to 14 MB on level 2), and an unpaired sweep measured caps of 64 to
+/// 1024 tiles there about 20 ms a tile slower
+fn winograd_tiles() -> Result<usize> {
+    match std::env::var("VOLKIT_METAL_WINO_TILES") {
+        Ok(v) => v.trim().parse().map_err(|_| color_eyre::eyre::eyre!("VOLKIT_METAL_WINO_TILES={v:?}: a tile count")),
+        Err(_) => Ok(256),
+    }
 }
 
 /// One BasicBlockD
@@ -147,6 +156,8 @@ struct Dec {
 /// One resolution level's buffers
 struct Level {
     dims: [usize; 3],
+    /// Channels
+    c: usize,
     rows: usize,
     bufs: [Buf; 3],
     /// The pooled skip input `[voxels, c_in]` and the skip projection `[voxels, c]`, where a block needs them
@@ -180,6 +191,8 @@ pub(crate) struct Model {
     pub patch: usize,
     /// The levels whose stride-1 convs run Winograd, ascending
     pub winograd: Vec<usize>,
+    /// The most tiles a level-0 Winograd chunk takes, 0 for as many as the scratch holds
+    wino_tiles: usize,
     stem: Conv,
     blocks: Vec<Block>,
     decs: Vec<Dec>,
@@ -197,6 +210,34 @@ pub(crate) struct Model {
     /// encoder to its decoder), and whether a conv used it, so its padding is zeroed again before level 0 reads it
     scratch: Cell<usize>,
     scratch_used: Cell<bool>,
+}
+
+/// Dispatches `in_partial` over the `[dims, c]` activation `x` (padded layout, or plain) into `part`, whose `[chunks,
+/// c]` partials `in_finalize` then merges; returns `chunks`, at most [`MAX_CHUNKS`]. A thread group takes a run of
+/// whole lines and up to 64 channel quads, split evenly when there are more
+pub(crate) fn in_partial(gpu: &Gpu, part: &Buf, x: &Buf, dims: [usize; 3], c: usize, padded: bool) -> Result<usize> {
+    ensure!(c.is_multiple_of(4), "InstanceNorm statistics over {c} channels: in_partial takes channel quads");
+    let quads = c / 4;
+    let qpg = quads.div_ceil(quads.div_ceil(64));
+    let lanes = 256 / qpg;
+    let lines = dims[0] * dims[1];
+    let chunk_lines = lines.div_ceil(MAX_CHUNKS);
+    let chunks = lines.div_ceil(chunk_lines);
+    ensure!(part.bytes() >= chunks * c * 16, "in_partial: {} bytes for {chunks} x {c} partials", part.bytes());
+    let args = [
+        part.arg(),
+        x.arg(),
+        dims[0].into(),
+        dims[1].into(),
+        dims[2].into(),
+        c.into(),
+        usize::from(padded).into(),
+        chunk_lines.into(),
+        qpg.into(),
+        lanes.into(),
+    ];
+    gpu.dispatch("in_partial", [chunks, quads.div_ceil(qpg), 1], [qpg * lanes, 1, 1], &args)?;
+    Ok(chunks)
 }
 
 /// The tap conv tile for `o` output channels: 64 wide unless that wastes half the tile
@@ -333,6 +374,7 @@ impl Model {
             let alloc = || gpu.alloc(rows * c * 4);
             levels.push(Level {
                 dims: d,
+                c,
                 rows,
                 bufs: [alloc()?, alloc()?, alloc()?],
                 pa: if need_pa[l] > 0 { Some(gpu.alloc(vox * need_pa[l] * 4)?) } else { None },
@@ -343,9 +385,14 @@ impl Model {
         let mut winograd: Vec<usize> = wino.into_iter().filter(|&l| l < n_levels && winograd::fits(edges[l])).collect();
         winograd.sort_unstable();
         winograd.dedup();
+        ensure!(
+            !winograd.contains(&0) || n_levels > 1,
+            "Winograd on level 0 takes its scratch from level 1, and this network has one level"
+        );
         Ok(Self {
             patch: p,
             winograd,
+            wino_tiles: winograd_tiles()?,
             stem,
             blocks,
             decs,
@@ -392,28 +439,7 @@ impl Model {
         let rows: usize = dims.iter().product();
         // in_finalize counts rows in float32, exact only up to 2^24 (a 256^3 patch)
         ensure!(rows <= 1 << 24, "InstanceNorm over {rows} rows: float32 counts are exact only to 2^24");
-        let cpg = c.min(64);
-        let lanes = 256 / cpg;
-        let chunk_rows = rows.div_ceil(MAX_CHUNKS).max(lanes);
-        let chunks = rows.div_ceil(chunk_rows);
-        let dims_args = dims.map(Arg::from);
-        gpu.dispatch(
-            "in_partial",
-            [chunks, c.div_ceil(cpg), 1],
-            [cpg * lanes, 1, 1],
-            &[
-                self.part.arg(),
-                x.arg(),
-                dims_args[0],
-                dims_args[1],
-                dims_args[2],
-                c.into(),
-                usize::from(padded).into(),
-                chunk_rows.into(),
-                cpg.into(),
-                lanes.into(),
-            ],
-        )?;
+        let chunks = in_partial(gpu, &self.part, x, dims, c, padded)?;
         gpu.dispatch(
             "in_finalize",
             [c, 1, 1],
@@ -467,14 +493,22 @@ impl Model {
     fn conv_s1(&self, gpu: &Gpu, l: usize, c: &Conv, x: &Buf, x2: Option<&Buf>, y: &Buf) -> Result<()> {
         let lv = &self.levels[l];
         if let Weights::Winograd(u) = &c.weights {
-            let k = self.scratch.get();
-            ensure!(l > 0 && k < 3, "a Winograd conv at level {l} before level 0's scratch is free");
             let inputs = match x2 {
                 Some(x2) => vec![(x, c.cin / 2), (x2, c.cin / 2)],
                 None => vec![(x, c.cin)],
             };
+            let out = (y, c.cout, c.bias.as_ref());
+            if l == 0 {
+                // level 1 holds nothing live while level 0 runs (its encoder before level 1's, its decoder after), so
+                // a level-1 buffer is the scratch, its padding zeroed again at once for level 1's convs
+                let l1 = &self.levels[1];
+                winograd::conv(gpu, u, &inputs, out, lv.dims, &l1.bufs[0], self.wino_tiles)?;
+                return winograd::zero_border(gpu, &l1.bufs[0], l1.dims, l1.c, l1.rows);
+            }
+            let k = self.scratch.get();
+            ensure!(k < 3, "a Winograd conv at level {l} before level 0's scratch is free");
             self.scratch_used.set(true);
-            return winograd::conv(gpu, u, &inputs, (y, c.cout, c.bias.as_ref()), lv.dims, &self.levels[0].bufs[k]);
+            return winograd::conv(gpu, u, &inputs, out, lv.dims, &self.levels[0].bufs[k], 0);
         }
         let [d, h, w] = lv.dims;
         let span = h * (w + 2);
@@ -638,7 +672,7 @@ impl Model {
             if l == 0 && self.scratch_used.get() {
                 // the scratch is the buffer this stage's transposed conv writes, and its padding must be zero again
                 let l0 = &lv[0];
-                winograd::zero_border(gpu, &l0.bufs[self.scratch.get()], l0.dims, self.stem.cout, l0.rows)?;
+                winograd::zero_border(gpu, &l0.bufs[self.scratch.get()], l0.dims, l0.c, l0.rows)?;
                 self.scratch_used.set(false);
             }
             let (li, xi) = cur;

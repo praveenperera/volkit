@@ -208,7 +208,7 @@ impl AfvV2 {
 ```
 
 `Fp32` on Metal runs the convolutions and GEMMs with true float32 operands where CUDA runs TF32, so Metal's output sits
-inside TF32's rounding noise of CUDA's, not byte-identical to it. The stride-1 convolutions of levels 1 and 2 run as
+inside TF32's rounding noise of CUDA's, not byte-identical to it. The stride-1 convolutions of levels 0 to 2 run as
 Winograd F(4,3), whose rounding differs from a direct convolution's by a few float32 ulps; `VOLKIT_METAL_WINOGRAD`
 chooses the levels. A given build, device and setting is deterministic: the same input gives the same bytes.
 
@@ -270,7 +270,8 @@ accepts little-endian float32 storages, contiguous tensors and stored (uncompres
 | `VOLKIT_PTX_TIER` | Force a PTX tier at or below the device's (`sm80` or `sm120`) |
 | `VOLKIT_CACHE_DIR` | Root of the on-disk caches (cuDNN algorithm choices, the driver's compiled-PTX cache) |
 | `VOLKIT_ALGO_CACHE` | `0`, `off` or `false` turns the cuDNN algorithm cache off |
-| `VOLKIT_METAL_WINOGRAD` | Metal: the levels whose stride-1 convolutions run Winograd F(4,3), comma-separated (default `1,2`), or `none` for direct convolutions everywhere |
+| `VOLKIT_METAL_WINOGRAD` | Metal: the levels whose stride-1 convolutions run Winograd F(4,3), comma-separated (default `0,1,2`), or `none` for direct convolutions everywhere |
+| `VOLKIT_METAL_WINO_TILES` | Metal: the most tiles one level-0 Winograd chunk takes (default 256, small enough to stay in the GPU's cache), or `0` for as many as the scratch holds |
 | `VOLKIT_METAL_PROFILE` | Metal: time every kernel with GPU counters, for `AfvV2::print_profile` (slows the run) |
 | `VOLKIT_METAL_TESTS` | `1` runs the Metal kernel tests, which touch the GPU; they skip otherwise |
 

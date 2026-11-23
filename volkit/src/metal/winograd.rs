@@ -1,7 +1,7 @@
-//! Winograd F(4x4x4, 3x3x3) for the stride-1 3x3x3 convs of the mid levels (kernels in `winograd.metal`): the
+//! Winograd F(4x4x4, 3x3x3) for the stride-1 3x3x3 convs of levels 0 to 2 (kernels in `winograd.metal`): the
 //! weights are transformed once at load, in float64 then rounded to float32, and each conv runs as an input
-//! transform, 216 batched GEMMs and an output transform, over chunks of whole tile planes sized to the scratch
-//! buffer it is given
+//! transform, 216 batched GEMMs and an output transform, over chunks of tiles sized to the scratch buffer it is
+//! given
 
 use color_eyre::eyre::{Result, ensure};
 
@@ -72,8 +72,9 @@ fn gemm_name(bm: usize, bn: usize) -> &'static str {
 
 /// One Winograd conv: `inputs` are padded activations of `dims` (one, or the decoder's `(up, skip)` pair) whose
 /// channels concatenate in order to `u`'s `c`; `out` is `(y, o, bias)`, the padded output of `o` channels whose
-/// interior gets the conv plus the bias, when given. `scratch` holds each chunk's V and M; its contents are left
-/// undefined
+/// interior gets the conv plus the bias, when given. The tiles go in chunks of at most `max_tiles` (0: as many as
+/// `scratch` holds), each chunk's V and M in `scratch`, whose contents are left undefined; a chunk small enough for
+/// the GPU's system-level cache keeps V and M out of DRAM
 pub(crate) fn conv(
     gpu: &Gpu,
     u: &Buf,
@@ -81,25 +82,24 @@ pub(crate) fn conv(
     (y, o, bias): (&Buf, usize, Option<&Buf>),
     dims: [usize; 3],
     scratch: &Buf,
+    max_tiles: usize,
 ) -> Result<()> {
     ensure!(fits(dims), "Winograd F(4,3) on a level of {dims:?}");
     let cv: usize = inputs.iter().map(|i| i.1).sum();
     ensure!(u.bytes() == POINTS * o * cv * 4, "Winograd weights of {} bytes for {o} x {cv}", u.bytes());
     let [d, h, w] = dims;
-    let per_plane = (h / 4) * (w / 4);
-    let planes = d / 4;
-    let tile_bytes = POINTS * (cv + o) * 4;
-    let chunk_planes = (scratch.bytes() / (tile_bytes * per_plane)).min(planes);
-    ensure!(chunk_planes > 0, "Winograd scratch of {} bytes holds no plane of {per_plane} tiles", scratch.bytes());
+    let tiles = (d / 4) * (h / 4) * (w / 4);
+    let fit = scratch.bytes() / (POINTS * (cv + o) * 4);
+    ensure!(fit > 0, "Winograd scratch of {} bytes holds no tile of {cv} + {o} channels", scratch.bytes());
+    let chunk = if max_tiles == 0 { fit } else { fit.min(max_tiles) };
     let (bias_arg, flags) = match bias {
         Some(b) => (b.arg(), 1u32),
         None => (scratch.arg(), 0),
     };
 
-    let mut plane = 0;
-    while plane < planes {
-        let np = chunk_planes.min(planes - plane);
-        let (t0, nt) = (plane * per_plane, np * per_plane);
+    let mut t0 = 0;
+    while t0 < tiles {
+        let nt = chunk.min(tiles - t0);
         let v = scratch.arg();
         let m = scratch.at::<f32>(POINTS * nt * cv);
         let mut coff = 0;
@@ -120,7 +120,7 @@ pub(crate) fn conv(
         let args =
             [y.arg(), m, bias_arg, d.into(), h.into(), w.into(), o.into(), t0.into(), nt.into(), Arg::U32(flags)];
         gpu.dispatch("wino_out", [nt, o.div_ceil(32), 1], [192, 1, 1], &args)?;
-        plane += np;
+        t0 += nt;
     }
 
     Ok(())
