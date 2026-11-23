@@ -59,7 +59,7 @@ To keep the 12.x libraries, keep CUDA 13 library directories off `LD_LIBRARY_PAT
 | `volkit/` | The crate: `nnunet` (export contract, AFV v2 engine, torch-free export), `pth` (the checkpoint reader), `weights`, `unet3d` (layer program), `dnn` (cuDNN algorithm choice and its on-disk cache), and the private device layer (buffers, checked kernel launches, cuDNN conv plans, cuBLAS GEMMs) |
 | `volkit/ptx/` | The embedded PTX tiers and cubins, built from `volkit-kernels` |
 | `volkit-kernels/` | cuda-oxide kernel sources, on their own pinned toolchain (outside the workspace) |
-| `volkit/src/metal/` | The Metal backend: device layer, MSL kernels (direct tensor-op convolutions, Winograd F(4,3) for the mid levels, InstanceNorm and blend glue) and the AFV v2 forward |
+| `volkit/src/metal/` | The Metal backend: device layer, MSL kernels (direct tensor-op convolutions, Winograd F(4,3) for levels 0 to 2, InstanceNorm and blend glue) and the AFV v2 forward |
 | `scripts/` | PTX and cubin build and staleness check, the PTX comparison against inkrs, and the inkrs reference run for GPU checks |
 
 [docs/KERNELS.md](https://github.com/praveenperera/volkit/blob/master/docs/KERNELS.md) covers the kernel tiers, how to rebuild them, and the entry-by-entry check of the PTX against inkrs's.

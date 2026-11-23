@@ -1,4 +1,4 @@
-// Winograd F(4x4x4, 3x3x3) for the stride-1 3x3x3 convs of the mid levels: each 4^3 block of outputs comes from a
+// Winograd F(4x4x4, 3x3x3) for the stride-1 3x3x3 convs of levels 0 to 2: each 4^3 block of outputs comes from a
 // 6^3 block of padded input, transformed (V = B^T d B per axis), multiplied point by point with the host-transformed
 // weights (U = G g G^T per axis) as 216 batched GEMMs on matmul2d, then transformed back (Y = A^T M A per axis). That
 // takes 216 multiplies per 64 outputs where the direct conv takes 27 per output, 8x fewer. The matrices are Lavin and
@@ -6,8 +6,8 @@
 // on its own (FP contraction is off for the library)
 //
 // Layouts: activations are the padded channels-last layout of common.metal; V is [216, tiles, cv] and M is [216,
-// tiles, o] for one chunk of tiles (whole planes of tiles in z, so a level's tiles go in a few chunks when its
-// scratch is small); U is [216, o, cv] per conv. A tile t of a chunk starting at tile t0 is global tile t0 + t, and
+// tiles, o] for one chunk of tiles (any run of consecutive tiles, sized so V and M stay in the GPU's system-level
+// cache); U is [216, o, cv] per conv. A tile t of a chunk starting at tile t0 is global tile t0 + t, and
 // global tile (tz, ty, tx) covers outputs [4 tz, 4 tz + 4) and so on, its input window padded voxels [4 tz, 4 tz + 6).
 // Interior dims must be multiples of 4
 

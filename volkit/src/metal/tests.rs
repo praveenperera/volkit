@@ -5,7 +5,7 @@
 //! plain `cargo test` never touches it: on a shared Mac the GPU is used only through its job queue
 
 use super::gpu::{Arg, Buf, Gpu};
-use super::model::padded_rows;
+use super::model::{in_partial, padded_rows};
 use super::winograd;
 
 /// The GPU when `VOLKIT_METAL_TESTS=1`, else `None` and the test returns early
@@ -349,13 +349,14 @@ fn moments(x: &[f32], c: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// InstanceNorm statistics, then the apply with each residual kind and LeakyReLU, on 40 channels (a channel group
-/// that is not a power of two) and more rows than one chunk holds
+/// InstanceNorm statistics, then the apply with each residual kind and LeakyReLU, on 40 channels (10 quads, a group
+/// that is not a power of two) over 4224 lines, more than `MAX_CHUNKS`, so a chunk takes two lines and its lanes sum
+/// different counts
 #[test]
 fn instance_norm_matches_float64() {
     let Some(gpu) = gpu() else { return };
     let mut rng = Rng(5);
-    let (d, c) = ([9usize, 10, 70], 40usize);
+    let (d, c) = ([66usize, 64, 30], 40usize);
     let vox: usize = d.iter().product();
     // an offset mean and a spread, as conv outputs have
     let y: Vec<f32> =
@@ -367,25 +368,9 @@ fn instance_norm_matches_float64() {
     let (m, rm) = (moments(&y, c), moments(&rs, c));
     let rows = padded_rows(d);
 
-    let cpg = c.min(64);
-    let lanes = 256 / cpg;
-    let chunk_rows = vox.div_ceil(4096).max(lanes);
-    let chunks = vox.div_ceil(chunk_rows);
-    let part = gpu.alloc(chunks * c * 16).unwrap();
+    let part = gpu.alloc(4096 * c * 16).unwrap();
     let stats_of = |x: &Buf, padded: bool, out: &Buf| {
-        let args: [Arg; 10] = [
-            part.arg(),
-            x.arg(),
-            d[0].into(),
-            d[1].into(),
-            d[2].into(),
-            c.into(),
-            usize::from(padded).into(),
-            chunk_rows.into(),
-            cpg.into(),
-            lanes.into(),
-        ];
-        gpu.dispatch("in_partial", [chunks, c.div_ceil(cpg), 1], [cpg * lanes, 1, 1], &args).unwrap();
+        let chunks = in_partial(&gpu, &part, x, d, c, padded).unwrap();
         let args = [out.arg(), part.arg(), chunks.into(), c.into(), eps.into()];
         gpu.dispatch("in_finalize", [c, 1, 1], [256, 1, 1], &args).unwrap();
     };
@@ -561,13 +546,16 @@ fn winograd_matches_float64() {
         };
         let (want, scale, _) = conv_ref(&xs, d, cv, &w, o, Some(&bias), [1; 3]);
         let u = gpu.upload(&winograd::transform_weights(&w, o, cv)).unwrap();
-        // room for one and a half planes of tiles: two chunks
+        // room for one and a half planes of tiles
         let scratch = gpu.alloc(winograd::POINTS * (cv + o) * 4 * per_plane * 3 / 2).unwrap();
-        let by = gpu.upload(&pad(None, d, o, f32::NAN)).unwrap();
         let inputs: Vec<(&Buf, usize)> = if concat { vec![(&bx, c), (&bx2, c)] } else { vec![(&bx, c)] };
-        winograd::conv(&gpu, &u, &inputs, (&by, o, Some(&bb)), d, &scratch).unwrap();
-        let got = unpad(&host(&gpu, &by, padded_rows(d) * o), d, o);
-        check(&format!("winograd concat={concat}"), &got, &want, &scale, 2e-5);
+        // chunks as large as the scratch allows (9 tiles, then 3) and of 5 tiles, both splitting planes of 6
+        for max_tiles in [0, 5] {
+            let by = gpu.upload(&pad(None, d, o, f32::NAN)).unwrap();
+            winograd::conv(&gpu, &u, &inputs, (&by, o, Some(&bb)), d, &scratch, max_tiles).unwrap();
+            let got = unpad(&host(&gpu, &by, padded_rows(d) * o), d, o);
+            check(&format!("winograd concat={concat} max_tiles={max_tiles}"), &got, &want, &scale, 2e-5);
+        }
     }
 }
 

@@ -24,7 +24,7 @@
 //! then cast to float32), and everything from the softmax on is the float32 path's
 //!
 //! On macOS the engine is the Metal backend: the same API and pipeline, with the convolutions and GEMMs on Metal 4
-//! tensor ops with true float32 operands instead of TF32, the stride-1 convolutions of levels 1 and 2 as Winograd
+//! tensor ops with true float32 operands instead of TF32, the stride-1 convolutions of levels 0 to 2 as Winograd
 //! F(4,3) (`VOLKIT_METAL_WINOGRAD` chooses the levels), and the seg head folded into the blend. Its `Options` has no
 //! cuDNN algorithm choice, and bf16 is CUDA-only
 
