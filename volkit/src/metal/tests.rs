@@ -571,3 +571,21 @@ fn zero_border_clears_only_the_padding() {
     // unpad asserts the padding is zero; the interior must be untouched
     assert!(unpad(&got, d, c).iter().all(|&v| v == 1.0), "zero_border wrote an interior voxel");
 }
+
+/// The validation run's negative control: zero_border on a buffer half the size its shape needs stores far past the
+/// buffer's end, which shader validation must report. Runs only with `VOLKIT_METAL_OOB_CONTROL=1`, since without the
+/// validation layer the stores land in whatever memory follows the buffer
+#[test]
+fn oob_control_stores_past_the_buffer() {
+    if std::env::var_os("VOLKIT_METAL_OOB_CONTROL").is_none_or(|v| v != "1") {
+        return;
+    }
+
+    let Some(gpu) = gpu() else { return };
+    let (d, c) = ([16usize, 16, 16], 32usize);
+    let rows = padded_rows(d);
+    // about 380 KB short, well past any page rounding of the allocation
+    let buf = gpu.upload(&vec![1.0f32; rows * c / 2]).unwrap();
+    winograd::zero_border(&gpu, &buf, d, c, rows).unwrap();
+    let _ = gpu.synchronize();
+}
