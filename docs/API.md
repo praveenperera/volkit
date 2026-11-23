@@ -4,11 +4,12 @@ What a consumer such as fibrs calls to run AFV v2 (`afv_fiber_9um_v2`) natively.
 inkrs's (`inkrs::nnunet::afv2` at inkrs `c1a9850`, the code behind `inkrs.AfvV2`), moved under `volkit::`, so a
 consumer switches by import path. Items marked *new* have no inkrs counterpart.
 
-The crate builds the CUDA runtime on Linux and Windows. On macOS it builds empty, so gate the dependency:
+The crate builds the CUDA runtime on Linux and Windows and the Metal runtime on macOS (Apple silicon). Both expose
+the `AfvV2` API below; only `Options` and `LoadReport` differ, as [Metal](#metal) lists.
 
 ```toml
-[target.'cfg(target_os = "linux")'.dependencies]
-volkit = "0.1"
+[dependencies]
+volkit = "0.2"
 ```
 
 volkit defaults to parity with the reference runner: `AfvPrecision::Fp32` is the default, and `AfvPrecision::Bf16` is an
@@ -161,6 +162,56 @@ the caller has written them). This is exactly the sequence `inkrs.AfvV2`'s Pytho
 layer drives; volkit has no tiler for it (`nnunet::grid` and `nnunet::engine` are the `vesuvius.predict` engine,
 which AFV v2 does not use, and stay in inkrs).
 
+### Metal
+
+On macOS, `volkit::nnunet::afv2` is the Metal engine: the same `AfvV2`, `AfvPrecision`, `ColumnOut`, `TileStats` and
+`MAX_BATCH`, with these `Options` and `LoadReport`. It needs macOS 26 or newer (Metal 4) and Apple silicon (M1 or
+newer); `AfvV2::open` fails with an unsupported error (`volkit::error::is_unsupported`) on anything else, on a device
+other than 0, and for `AfvPrecision::Bf16`, which is CUDA-only. The kernels are MSL compiled at `open`, so a build
+needs neither Xcode nor the Metal toolchain.
+
+```rust
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Metal device ordinal: Apple silicon has one GPU, device 0
+    pub device: usize,
+    /// Only `AfvPrecision::Fp32` runs on Metal
+    pub precision: AfvPrecision,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
+pub struct LoadReport {
+    pub model: String,
+    pub precision: AfvPrecision,
+    pub patch: usize,
+    pub border: usize,
+    /// Seconds spent loading the weights and compiling the kernels
+    pub load_s: f64,
+    /// The device's name, such as "Apple M4 Pro"
+    pub gpu: String,
+    /// Bytes the model's weights and activation buffers hold on the device
+    pub model_bytes: usize,
+    /// The device's recommended working set (`recommendedMaxWorkingSetSize`): the most this process should keep
+    /// allocated on the GPU before Metal starts paging
+    pub working_set: usize,
+    pub flops_per_tile: u64,
+    /// The levels whose stride-1 convolutions run Winograd F(4,3), ascending; outputs match byte for byte only
+    /// between equal lists
+    pub winograd_levels: Vec<usize>,
+}
+
+impl AfvV2 {
+    /// Prints each kernel's GPU time, when `VOLKIT_METAL_PROFILE` is set
+    pub fn print_profile(&self) -> Result<()>;
+}
+```
+
+`Fp32` on Metal runs the convolutions and GEMMs with true float32 operands where CUDA runs TF32, so Metal's output sits
+inside TF32's rounding noise of CUDA's, not byte-identical to it. The stride-1 convolutions of levels 1 and 2 run as
+Winograd F(4,3), whose rounding differs from a direct convolution's by a few float32 ulps; `VOLKIT_METAL_WINOGRAD`
+chooses the levels. A given build, device and setting is deterministic: the same input gives the same bytes.
+
 `LoadReport`, `ColumnOut` and `TileStats` are `#[non_exhaustive]` (new): read their fields freely, but outside volkit
 they cannot be built with a struct literal or destructured without `..`, so a later release can add fields without
 a breaking change. `TileStats::of` builds one.
@@ -219,9 +270,14 @@ accepts little-endian float32 storages, contiguous tensors and stored (uncompres
 | `VOLKIT_PTX_TIER` | Force a PTX tier at or below the device's (`sm80` or `sm120`) |
 | `VOLKIT_CACHE_DIR` | Root of the on-disk caches (cuDNN algorithm choices, the driver's compiled-PTX cache) |
 | `VOLKIT_ALGO_CACHE` | `0`, `off` or `false` turns the cuDNN algorithm cache off |
+| `VOLKIT_METAL_WINOGRAD` | Metal: the levels whose stride-1 convolutions run Winograd F(4,3), comma-separated (default `1,2`), or `none` for direct convolutions everywhere |
+| `VOLKIT_METAL_PROFILE` | Metal: time every kernel with GPU counters, for `AfvV2::print_profile` (slows the run) |
+| `VOLKIT_METAL_TESTS` | `1` runs the Metal kernel tests, which touch the GPU; they skip otherwise |
 
 ## Errors
 
 Functions return `color_eyre::eyre::Result`. `volkit::error::is_unsupported(&report)` is true when the model or
 contract is one volkit does not implement (a fallback case rather than a fault), and
-`volkit::error::is_library_error(&report)` when a CUDA library could not be loaded or trusted.
+`volkit::error::is_library_error(&report)` when a CUDA library could not be loaded or trusted. On Metal,
+`is_unsupported` is also true for an OS older than macOS 26, a GPU older than Apple7 (M1), a device other than 0
+and the bf16 precision.

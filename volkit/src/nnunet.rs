@@ -472,7 +472,7 @@ mod tests {
         let contract = Contract::from_sidecar(&sidecar).expect("afv2 sidecar");
         contract.afv_v2().expect("afv-v2");
         assert!(contract.recipe_tensors().is_empty());
-        crate::unet3d::model::HostNet::take(&ck, &contract.program, Precision::Tf32).expect("host net");
+        crate::unet3d::host::HostNet::take(&ck, &contract.program, Precision::Tf32).expect("host net");
         let (tensors, _, params) = ck.finish().expect("every tensor read");
         assert_eq!(tensors, contract.keys.len());
         assert!(!contract.keys.keys().any(|k| ["centre.", "affinity.", "direction."].iter().any(|h| k.starts_with(h))));
@@ -493,7 +493,7 @@ mod tests {
         let ck = crate::weights::Checkpoint::with_sidecar(tensors, aliases, &sidecar).expect("checkpoint");
         let contract = Contract::from_sidecar(&sidecar).expect("afv2 sidecar");
         contract.afv_v2().expect("afv-v2");
-        crate::unet3d::model::HostNet::take(&ck, &contract.program, Precision::Tf32).expect("host net");
+        crate::unet3d::host::HostNet::take(&ck, &contract.program, Precision::Tf32).expect("host net");
         let (tensors, _, _) = ck.finish().expect("every tensor read");
         assert_eq!(tensors, contract.keys.len());
     }

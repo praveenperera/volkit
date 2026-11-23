@@ -9,16 +9,21 @@
 //!
 //! The code came from inkrs 0.4.0's AFV v2 path with the same numerics: the same cudakit and cudarc, the same cuDNN
 //! and cuBLAS calls and algorithm choice, and PTX whose kernels match inkrs's entry for entry. It builds on Linux
-//! and Windows; on macOS the crate is empty
+//! and Windows. On macOS the same engine runs on the Apple GPU ([`nnunet::afv2`] there is a native Metal backend:
+//! MSL kernels compiled at load, Metal 4 tensor-op convolutions in float32), sharing the export, checkpoint and
+//! weight-layout code
 
-#![cfg(not(target_os = "macos"))]
 #![warn(missing_docs)]
 
 #[cfg(windows)]
 pub mod dll;
+#[cfg(not(target_os = "macos"))]
 pub mod dnn;
 pub mod error;
+#[cfg(not(target_os = "macos"))]
 pub(crate) mod gpu;
+#[cfg(target_os = "macos")]
+pub(crate) mod metal;
 pub mod nnunet;
 pub mod paths;
 pub mod pth;
