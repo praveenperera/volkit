@@ -707,6 +707,18 @@ fn unsupported_shapes_are_refused_before_the_device_opens() {
     }
 }
 
+/// The CoreGraphics link `MTLCreateSystemDefaultDevice` needs is in every binary that links volkit: this test
+/// binary's load commands name it. Checking the process's loaded images would not do, since Metal loads CoreGraphics
+/// on its own; it is the link Apple's docs ask for. `otool` comes with the Command Line Tools, which link this binary
+#[test]
+fn core_graphics_is_linked() {
+    let exe = std::env::current_exe().expect("test binary");
+    let out = std::process::Command::new("otool").arg("-L").arg(&exe).output().expect("otool");
+    assert!(out.status.success(), "otool -L failed: {}", String::from_utf8_lossy(&out.stderr));
+    let libs = String::from_utf8_lossy(&out.stdout);
+    assert!(libs.contains("/CoreGraphics.framework/"), "CoreGraphics not linked:\n{libs}");
+}
+
 /// The interior of the head's input after one forward of `tile` on `prog`'s network, Winograd on `winograd`
 fn forward(gpu: &Gpu, (prog, ck): &(Program, Checkpoint), p: usize, winograd: &[usize], tile: &[u8]) -> Vec<f32> {
     let layout = Layout::new(prog, p, winograd).expect("layout");

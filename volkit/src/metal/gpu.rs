@@ -29,6 +29,11 @@ use objc2_metal::{
     MTLLanguageVersion, MTLLibrary, MTLMathMode, MTLPipelineOption, MTLResourceOptions, MTLSize, MTLStorageMode,
 };
 
+// MTLCreateSystemDefaultDevice returns no device unless the process links CoreGraphics (Apple's docs for it, and
+// objc2-metal's), which an app links anyway but a command-line consumer would not
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {}
+
 /// The kernel library's sources, compiled together in this order: the shared header first
 pub(crate) const SOURCES: [&str; 4] = [
     include_str!("common.metal"),
