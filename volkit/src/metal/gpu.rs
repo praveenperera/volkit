@@ -403,6 +403,11 @@ impl Gpu {
         (self.device.currentAllocatedSize(), self.device.recommendedMaxWorkingSetSize() as usize)
     }
 
+    /// The largest buffer the device allocates (`maxBufferLength`), in bytes
+    pub fn max_buffer(&self) -> usize {
+        self.device.maxBufferLength()
+    }
+
     /// Waits for the kernel build started by [`Gpu::open`], surfacing a compile error
     pub fn ready(&self) -> Result<()> {
         self.kernels().map(|_| ())
@@ -429,6 +434,8 @@ impl Gpu {
     /// A buffer of `bytes` with every byte `value`, written by the host before any kernel can see it
     pub fn alloc_fill(&self, bytes: usize, value: u8) -> Result<Buf> {
         let len = bytes.max(4);
+        let max = self.max_buffer();
+        ensure!(len <= max, "a Metal buffer of {len} bytes, over the device's {max}-byte maxBufferLength");
         let raw = self
             .device
             .newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)

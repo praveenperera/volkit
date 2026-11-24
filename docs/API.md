@@ -195,6 +195,9 @@ pub struct LoadReport {
     /// The device's recommended working set (`recommendedMaxWorkingSetSize`): the most this process should keep
     /// allocated on the GPU before Metal starts paging
     pub working_set: usize,
+    /// The largest buffer the device allocates (`maxBufferLength`): a column's accumulator is one buffer of 8 bytes
+    /// a voxel, so a column of more voxels than an eighth of this fails to begin
+    pub max_buffer: usize,
     pub flops_per_tile: u64,
     /// The levels whose stride-1 convolutions run Winograd F(4,3), ascending; outputs match byte for byte only
     /// between equal lists

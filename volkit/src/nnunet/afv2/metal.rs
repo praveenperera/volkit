@@ -50,6 +50,9 @@ pub struct LoadReport {
     /// The device's recommended working set (`recommendedMaxWorkingSetSize`), in bytes: the most this process should
     /// keep allocated on the GPU before Metal starts paging
     pub working_set: usize,
+    /// The largest buffer the device allocates (`maxBufferLength`), in bytes. A column's accumulator is one buffer of
+    /// 8 bytes a voxel, so a column of more voxels than an eighth of this fails to begin
+    pub max_buffer: usize,
     /// Floating-point operations per tile
     pub flops_per_tile: u64,
     /// The U-Net levels whose stride-1 3x3x3 convolutions run as Winograd F(4,3) (`VOLKIT_METAL_WINOGRAD`), ascending;
@@ -134,6 +137,7 @@ impl AfvV2 {
             gpu: gpu.name(),
             model_bytes: model_gpu.bytes(),
             working_set: gpu.memory().1,
+            max_buffer: gpu.max_buffer(),
             flops_per_tile: contract.flops_per_patch,
             winograd_levels: model_gpu.winograd.clone(),
         };
