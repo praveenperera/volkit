@@ -22,7 +22,11 @@ All notable changes to volkit are documented here. The format follows
     405.3 ms for PyTorch 2.15 on MPS (2.00×), at a 2.68 GiB peak against MPS's 4.90 GiB.
   - `Options` there holds only the device (0) and the precision; `AfvPrecision::Bf16` is CUDA-only and fails with
     an unsupported error. `LoadReport` lists the device, the model's device bytes, the recommended working set and
-    the Winograd levels. [docs/API.md](docs/API.md#metal) has the details and the `VOLKIT_METAL_*` variables.
+    the Winograd levels and the largest buffer the device allocates. [docs/API.md](docs/API.md#metal) has the
+    details and the `VOLKIT_METAL_*` variables.
+  - A network the Metal forward can't run fails as unsupported (`is_unsupported`) before the device opens, a stem
+    without a bias runs, a failed `add` drops the column so `finish` cannot return it short, and the library links
+    CoreGraphics, which `MTLCreateSystemDefaultDevice` needs in a command-line program.
 
 ### Changed
 
