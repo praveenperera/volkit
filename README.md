@@ -12,15 +12,32 @@ volkit = "0.2"
 ```
 
 ```rust
-use volkit::dnn::Pick;
+use std::path::Path;
+
 use volkit::nnunet::afv2::{AfvPrecision, AfvV2, Options};
 
-// on macOS, Options has no `pick`: Options { device: 0, precision: AfvPrecision::Fp32 }
-let opts = Options { device: 0, pick: Pick::Find, precision: AfvPrecision::Fp32 };
-let mut net = AfvV2::open(model_dir_or_export, &opts)?;
-net.begin([nz, ny, nx], y0, x0)?;
-net.add(&tiles, &origins)?; // up to MAX_BATCH 128^3 uint8 tiles at their padded lattice origins
-let column = net.finish(true)?; // semantic (2, nz, ny, nx) and tracing (2, nz/2, ny/2, nx/2) uint8
+/// One column of `shape` (nz, ny, nx) at band position (y0, x0): `tiles` holds up to `MAX_BATCH` 128^3 uint8 tiles
+/// one after another, `origins` their padded lattice origins
+fn column(
+    model_dir_or_export: &Path,
+    shape: [usize; 3],
+    (y0, x0): (usize, usize),
+    tiles: &[u8],
+    origins: &[[usize; 3]],
+) -> color_eyre::Result<()> {
+    // CUDA's options also choose how cuDNN picks its algorithms; macOS's Metal engine has no cuDNN
+    #[cfg(not(target_os = "macos"))]
+    let opts = Options { device: 0, pick: volkit::dnn::Pick::Find, precision: AfvPrecision::Fp32 };
+    #[cfg(target_os = "macos")]
+    let opts = Options { device: 0, precision: AfvPrecision::Fp32 };
+
+    let mut net = AfvV2::open(model_dir_or_export, &opts)?;
+    net.begin(shape, y0, x0)?;
+    net.add(tiles, origins)?;
+    // semantic (2, nz, ny, nx) and tracing (2, nz/2, ny/2, nx/2) uint8
+    let column = net.finish(true)?;
+    Ok(())
+}
 ```
 
 [docs/API.md](https://github.com/praveenperera/volkit/blob/master/docs/API.md) lists the public API and environment variables.

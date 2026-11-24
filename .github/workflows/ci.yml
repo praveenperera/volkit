@@ -106,3 +106,9 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked
+
+      # the docs must build on macOS too, where `dnn` and `gpu` are absent
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p volkit --no-deps --locked
