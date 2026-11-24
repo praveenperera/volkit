@@ -19,7 +19,7 @@ use cudarc::cudnn::sys as dnn;
 use crate::gpu::{Buf, Gpu};
 
 pub mod algo_cache;
-pub(crate) mod gemm_bf16;
+pub mod gemm_bf16;
 
 fn check(status: dnn::cudnnStatus_t, what: &str) -> Result<()> {
     if status == dnn::cudnnStatus_t::CUDNN_STATUS_SUCCESS {
@@ -34,7 +34,7 @@ fn check(status: dnn::cudnnStatus_t, what: &str) -> Result<()> {
 ///
 /// cudakit keeps its handle private to its FP32 wrappers, so the FP16 plans make another
 /// after cudakit's symbol preflight has loaded the library
-pub(crate) struct Dnn(dnn::cudnnHandle_t);
+pub struct Dnn(dnn::cudnnHandle_t);
 
 impl Dnn {
     /// A handle bound to `gpu`'s stream
@@ -63,7 +63,7 @@ impl Drop for Dnn {
 
 /// A plan's data type: storage of x, w and y, and the math cuDNN may use. Accumulation is FP32
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Dtype {
+pub enum Dtype {
     /// FP16 data with tensor ops, the villa readers
     Half,
     /// FP32 data. `tf32` lets cuDNN round the inputs to TF32 on tensor cores, as PyTorch does
@@ -115,7 +115,7 @@ pub enum Pick {
 /// A convolution shape: batch, input and output channels, input spatial size (`[D, H, W]`
 /// or `[H, W]`), kernel size, padding and stride per spatial axis
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ConvShape {
+pub struct ConvShape {
     /// Batch size
     pub n: i32,
     /// Input channels
@@ -190,7 +190,7 @@ impl fmt::Display for ConvShape {
 
 /// One algorithm's entry in cuDNN's ranking
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AlgoPerf {
+pub struct AlgoPerf {
     /// The cuDNN forward algorithm
     pub algo: dnn::cudnnConvolutionFwdAlgo_t,
     /// cuDNN's status for this algorithm; anything but success means it does not run this shape
@@ -229,7 +229,7 @@ impl fmt::Display for AlgoPerf {
 }
 
 /// A planned NHWC/NDHWC convolution: descriptors and the chosen algorithm
-pub(crate) struct ConvPlan {
+pub struct ConvPlan {
     /// The convolution's shape
     pub shape: ConvShape,
     /// The plan's data type
@@ -572,7 +572,7 @@ fn to_perf(p: &dnn::cudnnConvolutionFwdAlgoPerf_t) -> AlgoPerf {
 }
 
 /// Our own cuBLAS handle on the GPU's stream, for FP16 GEMMs with FP32 accumulation
-pub(crate) struct Blas(blas::cublasHandle_t);
+pub struct Blas(blas::cublasHandle_t);
 
 impl Blas {
     /// A handle bound to `gpu`'s stream
