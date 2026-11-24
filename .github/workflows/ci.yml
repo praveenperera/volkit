@@ -1,6 +1,7 @@
 # Builds and checks volkit on Linux and Windows x86_64: formatting, the committed PTX against its kernel sources,
-# clippy and the CPU tests, plus a macOS build, where the crate is empty. A GitHub runner has no GPU, so nothing
-# here runs a model; CUDA loads at run time, so no job installs a CUDA toolkit
+# clippy and the CPU tests, plus clippy and the CPU tests on macOS arm64, where the crate is the Metal backend.
+# Nothing here runs a model or a GPU kernel; CUDA loads at run time, so no job installs a CUDA toolkit, and the
+# Metal kernels compile when an engine opens, so no job needs the Metal toolchain
 
 name: CI
 
@@ -82,8 +83,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p volkit --no-deps --locked
 
-  # on macOS the crate builds empty, which a consumer gating its dependency to Linux never relies on but a
-  # workspace build of theirs may still compile
+  # on macOS the crate is the Metal backend; its kernel tests need VOLKIT_METAL_TESTS=1 and skip here
   macos:
     name: Build (macOS arm64)
     runs-on: macos-26
@@ -102,4 +102,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Clippy
-        run: cargo clippy --workspace --lib --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
