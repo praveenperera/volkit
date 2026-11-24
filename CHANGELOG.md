@@ -6,6 +6,8 @@ All notable changes to volkit are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-24
+
 ### Added
 
 - The device layer is public, so another runtime can run its own kernels on
@@ -41,4 +43,5 @@ All notable changes to volkit are documented here. The format follows
   copying it, and loading builds transposed conv weights and encodes stored
   bytes without zero-filled scratch buffers.
 
+[0.1.3]: https://github.com/praveenperera/volkit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/praveenperera/volkit/compare/v0.1.1...v0.1.2
