@@ -4,7 +4,33 @@ All notable changes to volkit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - Unreleased
+
+### Added
+
+- A native Metal backend for Apple silicon. On macOS, `volkit::nnunet::afv2::AfvV2` runs AFV v2 on the GPU
+  through the same API as on CUDA: MSL kernels compiled when the engine opens, so a build needs neither Xcode nor
+  the Metal toolchain, with the convolutions on Metal 4 tensor ops (`matmul2d`) in float32 and Winograd F(4,3)
+  for the stride-1 convolutions of levels 0 to 2. It needs macOS 26 or newer on an M1 or newer.
+  - Accuracy: on real 128³ tiles of PHerc0826, the output matches PyTorch's float32 CPU forward to at most 1/255,
+    with under 0.01% of values differing and the same most-likely class on every foreground voxel. A build gives
+    the same bytes for the same input on every run, and an M4 Pro and an M5 give the same bytes.
+  - Against CUDA, on a 512 × 1024 × 1024 PHerc0826 crop: within 1/255 of strict float32 (`NVIDIA_TF32_OVERRIDE=0`)
+    on every voxel, with 0.004% differing. Against CUDA's default TF32 convolutions it is at most 3/255 apart,
+    which is the same distance as between TF32 and strict float32 on NVIDIA.
+  - Speed and memory on an M4 Pro, 16 tiles of PHerc0826 timed in alternating pairs: 202.7 ms a tile against
+    405.3 ms for PyTorch 2.15 on MPS (2.00×), at a 2.68 GiB peak against MPS's 4.90 GiB.
+  - `Options` there holds only the device (0) and the precision; `AfvPrecision::Bf16` is CUDA-only and fails with
+    an unsupported error. `LoadReport` lists the device, the model's device bytes, the recommended working set and
+    the Winograd levels and the largest buffer the device allocates. [docs/API.md](docs/API.md#metal) has the
+    details and the `VOLKIT_METAL_*` variables.
+  - A network the Metal forward can't run fails as unsupported (`is_unsupported`) before the device opens, a stem
+    without a bias runs, a failed `add` drops the column so `finish` cannot return it short, and the library links
+    CoreGraphics, which `MTLCreateSystemDefaultDevice` needs in a command-line program.
+
+### Changed
+
+- The crate no longer builds empty on macOS, so consumers can depend on it without a target gate.
 
 ## [0.1.3] - 2026-11-24
 
@@ -43,5 +69,6 @@ All notable changes to volkit are documented here. The format follows
   copying it, and loading builds transposed conv weights and encodes stored
   bytes without zero-filled scratch buffers.
 
+[0.2.0]: https://github.com/praveenperera/volkit/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/praveenperera/volkit/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/praveenperera/volkit/compare/v0.1.1...v0.1.2

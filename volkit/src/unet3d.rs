@@ -8,11 +8,14 @@
 //! InstanceNorm, LeakyReLU, residuals, pooling and concat
 
 use color_eyre::eyre::Result;
+#[cfg(not(target_os = "macos"))]
 use cudakit::{ComputeCapability, PtxTier};
 use serde::Deserialize;
 
 use crate::ensure_supported;
 
+pub(crate) mod host;
+#[cfg(not(target_os = "macos"))]
 pub(crate) mod model;
 
 /// The precision the network runs in: the activations' storage type, the weights' rounding, the cuDNN and
@@ -207,6 +210,7 @@ pub struct Program {
 
 /// Fails with [`Unsupported`](crate::error::Unsupported) on a device the engine can't run on: its convs are cuDNN bf16, which
 /// needs compute capability 8.0, and an sm75 PTX tier, which volkit does not ship, would lack its kernels
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn check_device(cc: ComputeCapability, tier: PtxTier) -> Result<()> {
     ensure_supported!(
         cc >= ComputeCapability::new(8, 0) && tier != PtxTier::Sm75,
@@ -466,7 +470,7 @@ impl Program {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
