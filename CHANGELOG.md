@@ -18,8 +18,8 @@ All notable changes to volkit are documented here. The format follows
   - Against CUDA, on a 512 × 1024 × 1024 PHerc0826 crop: within 1/255 of strict float32 (`NVIDIA_TF32_OVERRIDE=0`)
     on every voxel, with 0.004% differing. Against CUDA's default TF32 convolutions it is at most 3/255 apart,
     which is the same distance as between TF32 and strict float32 on NVIDIA.
-  - Speed and memory on an M4 Pro, 16 tiles of PHerc0826 timed in alternating pairs: 226.6 ms a tile against
-    402.1 ms for PyTorch 2.15 on MPS (1.77×), at a 2.69 GB peak against MPS's 4.90 GB.
+  - Speed and memory on an M4 Pro, 16 tiles of PHerc0826 timed in alternating pairs: 202.7 ms a tile against
+    405.3 ms for PyTorch 2.15 on MPS (2.00×), at a 2.68 GiB peak against MPS's 4.90 GiB.
   - `Options` there holds only the device (0) and the precision; `AfvPrecision::Bf16` is CUDA-only and fails with
     an unsupported error. `LoadReport` lists the device, the model's device bytes, the recommended working set and
     the Winograd levels. [docs/API.md](docs/API.md#metal) has the details and the `VOLKIT_METAL_*` variables.
