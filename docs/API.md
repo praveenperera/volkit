@@ -210,7 +210,9 @@ impl AfvV2 {
 `Fp32` on Metal runs the convolutions and GEMMs with true float32 operands where CUDA runs TF32, so Metal's output sits
 inside TF32's rounding noise of CUDA's, not byte-identical to it. The stride-1 convolutions of levels 0 to 2 run as
 Winograd F(4,3), whose rounding differs from a direct convolution's by a few float32 ulps; `VOLKIT_METAL_WINOGRAD`
-chooses the levels. A given build, device and setting is deterministic: the same input gives the same bytes.
+chooses the levels, and a level runs direct convolutions where its Winograd scratch (a buffer of another level)
+cannot hold one tile, which happens only on tiny networks. A given build, device and setting is deterministic: the
+same input gives the same bytes.
 
 `LoadReport`, `ColumnOut` and `TileStats` are `#[non_exhaustive]` (new): read their fields freely, but outside volkit
 they cannot be built with a struct literal or destructured without `..`, so a later release can add fields without
@@ -280,5 +282,7 @@ accepts little-endian float32 storages, contiguous tensors and stored (uncompres
 Functions return `color_eyre::eyre::Result`. `volkit::error::is_unsupported(&report)` is true when the model or
 contract is one volkit does not implement (a fallback case rather than a fault), and
 `volkit::error::is_library_error(&report)` when a CUDA library could not be loaded or trusted. On Metal,
-`is_unsupported` is also true for an OS older than macOS 26, a GPU older than Apple7 (M1), a device other than 0
-and the bf16 precision.
+`is_unsupported` is also true for an OS older than macOS 26, a GPU older than Apple7 (M1), a device other than 0,
+the bf16 precision, and a network the Metal forward can't run: a level width that is not a multiple of 4, a first
+encoder stage that strides or a later one that does not, or a level too large for 32-bit indexing. `AfvV2::open`
+checks the network before it opens the device.

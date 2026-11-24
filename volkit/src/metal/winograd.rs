@@ -62,6 +62,12 @@ pub(crate) fn fits(dims: [usize; 3]) -> bool {
     dims.iter().all(|&v| v > 0 && v.is_multiple_of(4))
 }
 
+/// How many tiles of a conv with `cv` input and `o` output channels a scratch buffer of `bytes` holds: each tile's V
+/// and M take 216 points of every channel
+pub(crate) fn tiles_in(bytes: usize, cv: usize, o: usize) -> usize {
+    bytes / (POINTS * (cv + o) * 4)
+}
+
 fn gemm_name(bm: usize, bn: usize) -> &'static str {
     match (bm, bn) {
         (64, 64) => "wino_gemm_64x64",
@@ -89,7 +95,7 @@ pub(crate) fn conv(
     ensure!(u.bytes() == POINTS * o * cv * 4, "Winograd weights of {} bytes for {o} x {cv}", u.bytes());
     let [d, h, w] = dims;
     let tiles = (d / 4) * (h / 4) * (w / 4);
-    let fit = scratch.bytes() / (POINTS * (cv + o) * 4);
+    let fit = tiles_in(scratch.bytes(), cv, o);
     ensure!(fit > 0, "Winograd scratch of {} bytes holds no tile of {cv} + {o} channels", scratch.bytes());
     let chunk = if max_tiles == 0 { fit } else { fit.min(max_tiles) };
     let (bias_arg, flags) = match bias {

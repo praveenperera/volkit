@@ -105,9 +105,9 @@ impl Conv {
 }
 
 /// The levels whose stride-1 3x3x3 convs run Winograd: `VOLKIT_METAL_WINOGRAD`, a comma-separated level list or
-/// `none`, defaulting to 0, 1 and 2. Level 0 takes its scratch from level 1, so it needs a second level. Level 3
+/// `none`, defaulting to 0, 1 and 2, of which [`Layout`] keeps those whose scratch holds a tile. Level 3
 /// stays direct by default: its transformed weights would take about 680 MB
-fn winograd_levels() -> Result<Vec<usize>> {
+pub(crate) fn winograd_levels() -> Result<Vec<usize>> {
     let spec = std::env::var("VOLKIT_METAL_WINOGRAD").unwrap_or_else(|_| "0,1,2".into());
     if spec == "none" {
         return Ok(Vec::new());
@@ -194,6 +194,8 @@ pub(crate) struct Model {
     /// The most tiles a level-0 Winograd chunk takes, 0 for as many as the scratch holds
     wino_tiles: usize,
     stem: Conv,
+    /// The stem's bias, zeros when the export has none: the stem kernel always adds one
+    stem_bias: Buf,
     blocks: Vec<Block>,
     decs: Vec<Dec>,
     head_w: Buf,
@@ -271,45 +273,142 @@ fn tconv_name(bn: usize) -> &'static str {
     if bn == 64 { "tconv_64x64" } else { "tconv_64x32" }
 }
 
-impl Model {
-    /// Uploads `host`'s weights for `prog` (cubic patch of edge `p`) and allocates the buffers. Only float32 runs on
-    /// Metal; the stem's first conv must take the one CT channel
-    pub fn new(gpu: &Gpu, host: &HostNet, prog: &Program, p: usize) -> Result<Self> {
+/// The forward's levels and the levels whose convs run Winograd, worked out from the program alone, so an export
+/// the Metal forward can't run fails as unsupported before the device opens. Level `l` is encoder stage `l`'s
+/// resolution: the stem and stage 0 share level 0, and every later stage strides into a level of its own
+pub(crate) struct Layout<'a> {
+    prog: &'a Program,
+    /// The cubic patch's edge
+    patch: usize,
+    /// Each level's interior dims (z, y, x) and channels
+    edges: Vec<[usize; 3]>,
+    widths: Vec<usize>,
+    /// The levels whose stride-1 3x3x3 convs run Winograd, ascending
+    winograd: Vec<usize>,
+}
+
+impl<'a> Layout<'a> {
+    /// The layout of `prog` on a cubic patch of edge `p`, Winograd on those of the `winograd` levels that can run it
+    pub fn new(prog: &'a Program, p: usize, winograd: &[usize]) -> Result<Self> {
         prog.check_axes()?;
-        ensure_supported!(host.precision == Precision::Tf32, "the Metal forward runs float32 only");
+        let stages = prog.levels([p; 3], 1)?;
         ensure_supported!(
             prog.stem.len() == 1 && prog.stem[0].cin == 1 && prog.stem[0].kernel == [3, 3, 3],
             "the Metal forward's stem is one 3x3x3 conv on one channel"
         );
         ensure_supported!(prog.stem[0].cout.is_multiple_of(8), "stem of {} channels", prog.stem[0].cout);
-        let stem = Conv::new(gpu, &host.stem[0], &prog.stem[0], false, false)?;
-        let wino = winograd_levels()?;
+
+        // a stage that keeps its input's resolution would share a level with the one before, and a strided first
+        // stage would leave the stem's level without a skip for the last decoder stage
+        let mut edges = vec![[p; 3]];
+        let mut widths = vec![prog.stem[0].cout];
+        for (s, stage) in prog.stages.iter().enumerate() {
+            let strided = stage[0].conv1.stride.iter().any(|&v| v != 1);
+            ensure_supported!(
+                strided == (s > 0),
+                "the Metal forward needs the first encoder stage at the stem's resolution and every later stage \
+                 strided; stage {s} {}",
+                if strided { "strides" } else { "does not" }
+            );
+            if s > 0 {
+                edges.push(stages[s].0);
+                widths.push(stages[s].1);
+            }
+            for b in stage {
+                ensure_supported!(
+                    b.conv1.kernel == [3, 3, 3] && b.conv2.kernel == [3, 3, 3],
+                    "block convs must be 3x3x3"
+                );
+                ensure_supported!(
+                    widths[s] == b.conv1.cout && widths[s] == b.conv2.cout,
+                    "the Metal forward keeps one width per level; block at level {s} is {} -> {}",
+                    b.conv1.cout,
+                    b.conv2.cout
+                );
+                let pools = b.skip.pool.axes() != [1; 3];
+                ensure_supported!(
+                    b.skip.proj.is_none() || pools,
+                    "a projected skip without a pool (a width change at stride 1)"
+                );
+            }
+        }
+
+        let n = edges.len();
+        for (d, ds) in prog.decoder.iter().enumerate() {
+            let lv = n - 2 - d;
+            let t = &ds.transp;
+            ensure_supported!(t.cout == widths[lv], "decoder {d}: transp to {}, level {lv} is {}", t.cout, widths[lv]);
+            for (i, cv) in ds.convs.iter().enumerate() {
+                ensure_supported!(cv.kernel == [3, 3, 3] && cv.cout == widths[lv], "decoder {d} conv {i}");
+            }
+        }
+        for (l, (&d, &c)) in edges.iter().zip(&widths).enumerate() {
+            ensure_supported!(c.is_multiple_of(4), "level {l} of {c} channels; the norm kernels take multiples of 4");
+            let rows = padded_rows(d);
+            ensure_supported!(u32::try_from(rows * c).is_ok(), "level {l}: {rows} x {c} overflows 32-bit indexing");
+            // in_finalize counts rows in float32, exact only up to 2^24 (a 256^3 patch)
+            let vox: usize = d.iter().product();
+            ensure_supported!(vox <= 1 << 24, "InstanceNorm over {vox} rows: float32 counts are exact only to 2^24");
+        }
+
+        // the widest input a stride-1 conv takes at each level: the decoder's (up, skip) concat where one runs
+        let mut cin = vec![0usize; n];
+        for (s, stage) in prog.stages.iter().enumerate() {
+            for b in stage {
+                if s == 0 {
+                    cin[s] = cin[s].max(b.conv1.cin);
+                }
+                cin[s] = cin[s].max(b.conv2.cin);
+            }
+        }
+        for (d, ds) in prog.decoder.iter().enumerate() {
+            let lv = n - 2 - d;
+            cin[lv] = ds.convs.iter().map(|cv| cv.cin).fold(cin[lv], usize::max);
+        }
+        // level 0's Winograd scratch is a level-1 buffer and the other levels' a level-0 one, so a level runs
+        // Winograd only where that buffer holds at least one tile; tiny networks run their direct convs instead
+        let scratch = |l: usize| match l {
+            0 if n > 1 => padded_rows(edges[1]) * widths[1] * 4,
+            0 => 0,
+            _ => padded_rows(edges[0]) * widths[0] * 4,
+        };
+        let mut winograd: Vec<usize> = winograd
+            .iter()
+            .copied()
+            .filter(|&l| l < n && winograd::fits(edges[l]) && winograd::tiles_in(scratch(l), cin[l], widths[l]) > 0)
+            .collect();
+        winograd.sort_unstable();
+        winograd.dedup();
+
+        Ok(Self { prog, patch: p, edges, widths, winograd })
+    }
+
+    /// The levels whose stride-1 3x3x3 convs run Winograd, ascending
+    pub fn winograd(&self) -> &[usize] {
+        &self.winograd
+    }
+}
+
+impl Model {
+    /// Uploads `host`'s weights for `layout`'s program and allocates the buffers. Only float32 runs on Metal
+    pub fn new(gpu: &Gpu, host: &HostNet, layout: &Layout) -> Result<Self> {
+        ensure_supported!(host.precision == Precision::Tf32, "the Metal forward runs float32 only");
+        let (prog, n_levels) = (layout.prog, layout.edges.len());
+        let mut stem = Conv::new(gpu, &host.stem[0], &prog.stem[0], false, false)?;
+        // the stem kernel always adds a bias, so a bias-free stem adds zeros
+        let stem_bias = match stem.bias.take() {
+            Some(b) => b,
+            None => gpu.alloc(stem.cout * 4)?,
+        };
+        let wino = layout.winograd();
 
         let mut blocks = Vec::new();
-        let (mut dims, mut level) = ([p; 3], 0usize);
-        let mut edges = vec![dims];
-        let mut widths = vec![stem.cout];
-        let mut need_pa = vec![0usize];
-        let mut need_rs = vec![false];
-        for (b, hb) in prog.stages.iter().flatten().zip(&host.blocks) {
+        let mut need_pa = vec![0usize; n_levels];
+        let mut need_rs = vec![false; n_levels];
+        let specs = prog.stages.iter().enumerate().flat_map(|(s, stage)| stage.iter().map(move |b| (s, b)));
+        for ((lout, b), hb) in specs.zip(&host.blocks) {
             let stride = [b.conv1.stride[0], b.conv1.stride[1], b.conv1.stride[2]];
-            if stride != [1; 3] {
-                dims = std::array::from_fn(|a| dims[a] / stride[a]);
-                level += 1;
-                edges.push(dims);
-                widths.push(b.conv2.cout);
-                need_pa.push(0);
-                need_rs.push(false);
-            }
-            let lout = level;
-            ensure_supported!(b.conv1.kernel == [3, 3, 3] && b.conv2.kernel == [3, 3, 3], "block convs must be 3x3x3");
-            ensure_supported!(
-                widths[lout] == b.conv1.cout && widths[lout] == b.conv2.cout,
-                "the Metal forward keeps one width per level; block at level {lout} is {} -> {}",
-                b.conv1.cout,
-                b.conv2.cout
-            );
-            let at = wino.contains(&lout) && winograd::fits(dims);
+            let at = wino.contains(&lout);
             let conv1 = Conv::new(gpu, &hb.conv1, &b.conv1, false, at && stride == [1; 3])?;
             let conv2 = Conv::new(gpu, &hb.conv2, &b.conv2, false, at)?;
             let proj = match (&b.skip.proj, &hb.proj) {
@@ -317,28 +416,20 @@ impl Model {
                 _ => None,
             };
             let pool = Some(b.skip.pool.axes()).filter(|&a| a != [1; 3]);
-            ensure_supported!(
-                proj.is_none() || pool.is_some(),
-                "a projected skip without a pool (a width change at stride 1)"
-            );
             if pool.is_some() {
                 need_pa[lout] = need_pa[lout].max(b.conv1.cin);
             }
             need_rs[lout] |= proj.is_some();
             blocks.push(Block { conv1, conv2, pool, proj, leaky: b.leaky, lout });
         }
-        let n_levels = level + 1;
-        ensure!(prog.decoder.len() + 1 == n_levels, "{} decoder stages for {n_levels} levels", prog.decoder.len());
 
         let mut decs = Vec::new();
         for (d, (ds, hd)) in prog.decoder.iter().zip(&host.decs).enumerate() {
             let lv = n_levels - 2 - d;
             let t = &ds.transp;
-            ensure_supported!(t.cout == widths[lv], "decoder {d}: transp to {}, level {lv} is {}", t.cout, widths[lv]);
+            let at = wino.contains(&lv);
             let mut convs = Vec::new();
             for (i, (cv, hc)) in ds.convs.iter().zip(&hd.convs).enumerate() {
-                ensure_supported!(cv.kernel == [3, 3, 3] && cv.cout == widths[lv], "decoder {d} conv {i}");
-                let at = wino.contains(&lv) && winograd::fits(edges[lv]);
                 convs.push(Conv::new(gpu, hc, cv, i == 0 && !at, at)?);
             }
             let taps: usize = t.kernel.iter().product();
@@ -365,12 +456,9 @@ impl Model {
         let head_b = gpu.upload(&host.head_b)?;
 
         let mut levels = Vec::new();
-        for l in 0..n_levels {
-            let (d, c) = (edges[l], widths[l]);
-            ensure!(c.is_multiple_of(4), "level {l} of {c} channels; the norm kernels take multiples of 4");
+        for (l, (&d, &c)) in layout.edges.iter().zip(&layout.widths).enumerate() {
             let rows = padded_rows(d);
             let vox: usize = d.iter().product();
-            ensure!(u32::try_from(rows * c).is_ok(), "level {l}: {rows} x {c} overflows 32-bit indexing");
             let alloc = || gpu.alloc(rows * c * 4);
             levels.push(Level {
                 dims: d,
@@ -381,19 +469,13 @@ impl Model {
                 rs: if need_rs[l] { Some(gpu.alloc(vox * c * 4)?) } else { None },
             });
         }
-        let max_c = widths.iter().copied().max().unwrap_or(1);
-        let mut winograd: Vec<usize> = wino.into_iter().filter(|&l| l < n_levels && winograd::fits(edges[l])).collect();
-        winograd.sort_unstable();
-        winograd.dedup();
-        ensure!(
-            !winograd.contains(&0) || n_levels > 1,
-            "Winograd on level 0 takes its scratch from level 1, and this network has one level"
-        );
+        let max_c = layout.widths.iter().copied().max().unwrap_or(1);
         Ok(Self {
-            patch: p,
-            winograd,
+            patch: layout.patch,
+            winograd: layout.winograd().to_vec(),
             wino_tiles: winograd_tiles()?,
             stem,
+            stem_bias,
             blocks,
             decs,
             head_w,
@@ -417,7 +499,7 @@ impl Model {
     /// Device bytes the model's buffers hold
     pub fn bytes(&self) -> usize {
         let conv = Conv::bytes;
-        let mut total = conv(&self.stem) + self.head_w.bytes() + self.head_b.bytes();
+        let mut total = conv(&self.stem) + self.stem_bias.bytes() + self.head_w.bytes() + self.head_b.bytes();
         for b in &self.blocks {
             total += conv(&b.conv1) + conv(&b.conv2) + b.proj.as_ref().map_or(0, conv);
         }
@@ -595,7 +677,7 @@ impl Model {
                 tile,
                 table,
                 s.direct()?.0.arg(),
-                s.bias.as_ref().unwrap_or(&self.dummy).arg(),
+                self.stem_bias.arg(),
                 p.into(),
                 s.cout.into(),
                 (p.pow(3) * s.cout / 8).into(),

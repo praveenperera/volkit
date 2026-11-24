@@ -16,7 +16,7 @@ use super::super::{AfvV2Recipe, Contract};
 use super::{AfvPrecision, CLASSES, Column, ColumnOut, MAX_BATCH, NONFINITE, TileStats, clip};
 use crate::ensure_supported;
 use crate::metal::gpu::{Arg, Buf, Gpu};
-use crate::metal::model::Model;
+use crate::metal::model::{Layout, Model, winograd_levels};
 use crate::unet3d::host::HostNet;
 use crate::weights::Checkpoint;
 
@@ -113,16 +113,17 @@ impl AfvV2 {
         let contract = Contract::from_sidecar(&sidecar)?;
         let recipe = contract.afv_v2()?;
         let p = contract.patch_size[0];
-        // the device only once the model has parsed, so a bad model fails without touching the GPU; the kernel
-        // library then compiles on its own thread while the weights are laid out
+        let vox = p.pow(3);
+        ensure_supported!(u32::try_from(vox * 64).is_ok(), "a {p}^3 tile overflows 32-bit indexing");
+        let layout = Layout::new(&contract.program, p, &winograd_levels()?)?;
+        // the device only once the model has parsed and its shape checked, so a bad or unsupported model fails
+        // without touching the GPU; the kernel library then compiles on its own thread while the weights are laid out
         let gpu = Gpu::open(opts.device)?;
         let host = HostNet::take(&ck, &contract.program, opts.precision.net())?;
         ck.finish()?;
         ensure!(host.head_b.len() == CLASSES, "{} head classes, AFV v2's seg head has {CLASSES}", host.head_b.len());
-        let vox = p.pow(3);
-        ensure_supported!(u32::try_from(vox * 64).is_ok(), "a {p}^3 tile overflows 32-bit indexing");
 
-        let model_gpu = Model::new(&gpu, &host, &contract.program, p)?;
+        let model_gpu = Model::new(&gpu, &host, &layout)?;
         gpu.ready()?;
         let load = LoadReport {
             model: contract.name.clone(),

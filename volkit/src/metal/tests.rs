@@ -1,12 +1,21 @@
 //! The Metal kernels against float64 CPU references, on small shapes that cross every tile edge: partial row and
 //! channel tiles, lines longer than a tile, both concat inputs, both stride patterns AFV v2 uses. Each output
 //! buffer starts with NaN in every interior element a kernel must write and zero in its padding, so a missed write
-//! and a write into the padding both fail. Each test needs the GPU and skips unless `VOLKIT_METAL_TESTS=1`, so a
-//! plain `cargo test` never touches it: on a shared Mac the GPU is used only through its job queue
+//! and a write into the padding both fail. Then the forward on tiny networks, and the shape checks [`Layout`] makes
+//! before the device opens. Each test that needs the GPU skips unless `VOLKIT_METAL_TESTS=1`, so a plain
+//! `cargo test` never touches it: on a shared Mac the GPU is used only through its job queue
+
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
 
 use super::gpu::{Arg, Buf, Gpu};
-use super::model::{in_partial, padded_rows};
+use super::model::{Layout, Model, in_partial, padded_rows};
 use super::winograd;
+use crate::error::is_unsupported;
+use crate::unet3d::host::HostNet;
+use crate::unet3d::{Precision, Program};
+use crate::weights::Checkpoint;
 
 /// The GPU when `VOLKIT_METAL_TESTS=1`, else `None` and the test returns early
 fn gpu() -> Option<Gpu> {
@@ -588,4 +597,146 @@ fn oob_control_stores_past_the_buffer() {
     let buf = gpu.upload(&vec![1.0f32; rows * c / 2]).unwrap();
     winograd::zero_border(&gpu, &buf, d, c, rows).unwrap();
     let _ = gpu.synchronize();
+}
+
+/// A tiny network's program and random weights, built layer by layer
+struct Tiny {
+    rng: Rng,
+    tensors: BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+}
+
+impl Tiny {
+    fn tensor(&mut self, name: String, shape: Vec<usize>, scale: f32, offset: f32) -> String {
+        let v = self.rng.vec(shape.iter().product()).into_iter().map(|x| offset + scale * x).collect();
+        self.tensors.insert(name.clone(), (shape, v));
+        name
+    }
+
+    /// A `k`^3 conv of stride `s`; the transposed conv's weight is `[cin, cout, k^3]`, a conv's `[cout, cin, k^3]`
+    fn conv(&mut self, name: &str, (cin, cout): (usize, usize), k: usize, s: usize, bias: bool, norm: bool) -> Value {
+        let shape = if name.ends_with(".t") { vec![cin, cout, k, k, k] } else { vec![cout, cin, k, k, k] };
+        let w = self.tensor(format!("{name}.w"), shape, 1.0 / ((cin * k * k * k) as f32).sqrt(), 0.0);
+        let b = bias.then(|| self.tensor(format!("{name}.b"), vec![cout], 0.1, 0.0));
+        let norm = norm.then(|| {
+            let (nw, nb) = (
+                self.tensor(format!("{name}.nw"), vec![cout], 0.2, 1.0),
+                self.tensor(format!("{name}.nb"), vec![cout], 0.1, 0.0),
+            );
+            json!({"w": nw, "b": nb, "eps": 1e-5})
+        });
+        json!({"w": w, "b": b, "cin": cin, "cout": cout, "kernel": [k, k, k], "stride": [s, s, s], "norm": norm, "leaky": null})
+    }
+}
+
+/// A tiny ResEnc U-Net and its random weights: one block per stage, stage `s` striding by `stages[s].0` into
+/// `stages[s].1` channels, a stem of stage 0's width (its bias zero, or absent when `stem_bias` is false), the
+/// decoder mirroring the encoder, and a 1x1 head of 4 classes
+fn tiny(stages: &[(usize, usize)], stem_bias: bool) -> (Program, Checkpoint) {
+    let mut t = Tiny { rng: Rng(11), tensors: BTreeMap::new() };
+    let leaky = |mut v: Value| {
+        v["leaky"] = json!(0.01);
+        v
+    };
+    let mut c = stages[0].1;
+    let mut stem = leaky(t.conv("stem", (1, c), 3, 1, true, true));
+    if stem_bias {
+        t.tensors.get_mut("stem.b").expect("stem bias").1.fill(0.0);
+    } else {
+        t.tensors.remove("stem.b");
+        stem["b"] = Value::Null;
+    }
+    let mut encoder = Vec::new();
+    for (i, &(s, w)) in stages.iter().enumerate() {
+        let conv1 = leaky(t.conv(&format!("e{i}.c1"), (c, w), 3, s, true, true));
+        let conv2 = t.conv(&format!("e{i}.c2"), (w, w), 3, 1, true, true);
+        let proj = (c != w).then(|| t.conv(&format!("e{i}.p"), (c, w), 1, 1, false, true));
+        encoder.push(json!([{"conv1": conv1, "conv2": conv2, "skip": {"pool": s, "proj": proj}, "leaky": 0.01}]));
+        c = w;
+    }
+    let mut decoder = Vec::new();
+    for d in 0..stages.len() - 1 {
+        let lv = stages.len() - 2 - d;
+        let (s, w) = (stages[lv + 1].0, stages[lv].1);
+        let transp = t.conv(&format!("d{d}.t"), (c, w), s, s, true, false);
+        let conv0 = leaky(t.conv(&format!("d{d}.c0"), (2 * w, w), 3, 1, true, true));
+        decoder.push(json!({"transp": transp, "convs": [conv0]}));
+        c = w;
+    }
+    let head = t.conv("head", (c, 4), 1, 1, true, false);
+    let prog = json!({"stem": [stem], "stages": encoder, "decoder": decoder, "head": head});
+    let prog: Program = serde_json::from_value(prog).expect("program");
+    (prog, Checkpoint::from_parts(t.tensors, BTreeMap::new()).expect("checkpoint"))
+}
+
+/// AFV v2's program, from the export fixture
+fn afv2_program() -> Program {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/nnunet/afv2.json");
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(path).expect("fixture")).expect("fixture JSON");
+    serde_json::from_value(sidecar["program"].clone()).expect("program")
+}
+
+/// AFV v2 keeps Winograd on levels 0 to 2. On a tiny network level 0's scratch (a level-1 buffer of 300 rows x 16
+/// channels) holds no tile of its (up, skip) conv, 216 points x (16 + 8) channels, so level 0 runs direct while
+/// level 1, whose scratch is level 0's larger buffer, keeps Winograd
+#[test]
+fn winograd_runs_only_where_its_scratch_holds_a_tile() {
+    let afv2 = afv2_program();
+    assert_eq!(Layout::new(&afv2, 128, &[0, 1, 2]).expect("afv2").winograd(), [0, 1, 2]);
+    let (prog, _) = tiny(&[(1, 8), (2, 16)], true);
+    assert_eq!(Layout::new(&prog, 8, &[0, 1, 2]).expect("tiny").winograd(), [1]);
+    // with one level there is no level-1 scratch at all
+    let (one, _) = tiny(&[(1, 8)], true);
+    assert_eq!(Layout::new(&one, 8, &[0]).expect("one level").winograd(), [] as [usize; 0]);
+}
+
+/// Shapes the Metal forward can't run fail as unsupported, so a caller can fall back, before the device opens: a
+/// width the norm kernels can't take, a strided first stage (whose stem level has no skip for the last decoder
+/// stage) and a later stage that keeps its input's resolution
+#[test]
+fn unsupported_shapes_are_refused_before_the_device_opens() {
+    for (stages, p) in [
+        (&[(1, 8), (2, 6)][..], 8),
+        (&[(2, 8), (1, 8)][..], 8),
+        (&[(2, 8), (2, 16)][..], 16),
+        (&[(1, 8), (1, 8)][..], 8),
+    ] {
+        let (prog, _) = tiny(stages, true);
+        prog.levels([p; 3], 1).unwrap_or_else(|e| panic!("{stages:?}: the contract accepts it: {e:?}"));
+        let err = Layout::new(&prog, p, &[]).err().unwrap_or_else(|| panic!("{stages:?} accepted"));
+        assert!(is_unsupported(&err), "{stages:?}: {err:?}");
+    }
+}
+
+/// The interior of the head's input after one forward of `tile` on `prog`'s network, Winograd on `winograd`
+fn forward(gpu: &Gpu, (prog, ck): &(Program, Checkpoint), p: usize, winograd: &[usize], tile: &[u8]) -> Vec<f32> {
+    let layout = Layout::new(prog, p, winograd).expect("layout");
+    assert_eq!(layout.winograd(), winograd, "the layout changed the Winograd levels");
+    let net = HostNet::take(ck, prog, Precision::Tf32).expect("host weights");
+    let mut model = Model::new(gpu, &net, &layout).expect("model");
+    let table: Vec<f32> = (0..256).map(|v| (v as f32 - 128.0) / 40.0).collect();
+    let (bt, btab) = (gpu.upload(tile).unwrap(), gpu.upload(&table).unwrap());
+    model.forward(gpu, bt.arg(), btab.arg()).expect("forward");
+    let h = model.head();
+    unpad(&host(gpu, h.x, padded_rows([p; 3]) * h.cin), [p; 3], h.cin)
+}
+
+/// A tiny network's forward runs with Winograd on the level whose scratch holds a tile and direct convs elsewhere,
+/// matching the all-direct forward within Winograd's rounding; a stem without a bias matches one with a zero bias
+/// bit for bit
+#[test]
+fn tiny_forward_runs_and_matches_direct() {
+    let Some(gpu) = gpu() else { return };
+    let p = 8;
+    let mut rng = Rng(12);
+    let tile: Vec<u8> = (0..p * p * p).map(|_| ((rng.f() + 1.0) * 127.9) as u8).collect();
+    let net = tiny(&[(1, 8), (2, 16)], true);
+    let wino = forward(&gpu, &net, p, &[1], &tile);
+    let direct = forward(&gpu, &net, p, &[], &tile);
+    let worst = wino.iter().zip(&direct).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    eprintln!("tiny forward: Winograd against direct, worst {worst:.2e}");
+    assert!(worst <= 1e-3, "Winograd forward off the direct one by {worst}");
+    assert!(direct.iter().all(|v| v.is_finite()) && direct.iter().any(|&v| v != 0.0), "degenerate forward");
+
+    let no_bias = forward(&gpu, &tiny(&[(1, 8), (2, 16)], false), p, &[1], &tile);
+    assert!(no_bias.iter().zip(&wino).all(|(a, b)| a.to_bits() == b.to_bits()), "bias-free stem differs");
 }
