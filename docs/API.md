@@ -203,9 +203,13 @@ pub struct LoadReport {
 
 impl AfvV2 {
     /// Prints each kernel's GPU time, when `VOLKIT_METAL_PROFILE` is set
-    pub fn print_profile(&self) -> Result<()>;
+    pub fn print_profile(&mut self) -> Result<()>;
 }
 ```
+
+A failed `add` drops the column on Metal, and so does a failed `print_profile`, which waits for the queued work:
+the GPU reports a failed command buffer once, at the next wait, which may come in a later call than the one that
+queued it. Until the next `begin`, `add` and `finish` then fail rather than return a column missing tiles.
 
 `Fp32` on Metal runs the convolutions and GEMMs with true float32 operands where CUDA runs TF32, so Metal's output sits
 inside TF32's rounding noise of CUDA's, not byte-identical to it. The stride-1 convolutions of levels 0 to 2 run as

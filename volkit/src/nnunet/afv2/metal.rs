@@ -179,6 +179,7 @@ impl AfvV2 {
     /// Starts the column of `shape` `(nz, ny, nx)` whose first voxel is at volume `(0, y0, x0)` of the band, with
     /// zeroed accumulators; a column already begun and not finished is dropped
     pub fn begin(&mut self, shape: [usize; 3], y0: usize, x0: usize) -> Result<()> {
+        self.col = None;
         let n: usize = shape.iter().product();
         ensure!(n > 0, "empty column {shape:?}");
         ensure_supported!(u32::try_from(2 * n).is_ok(), "a column of {n} voxels overflows 32-bit indexing");
@@ -195,7 +196,19 @@ impl AfvV2 {
     /// inputs one after another (the band read and reflected as the reference's `read_tile` does), `origins`
     /// their padded `(pz, py, px)` lattice origins. At most [`MAX_BATCH`] tiles a call; the returned statistics
     /// are each tile's normalisation
+    ///
+    /// A failure drops the column, so a later [`Self::add`] or [`Self::finish`] fails until the next
+    /// [`Self::begin`]: the batch may have blended in part, and a failed command buffer from an earlier batch
+    /// surfaces only once, at the next wait
     pub fn add(&mut self, tiles: &[u8], origins: &[[usize; 3]]) -> Result<Vec<TileStats>> {
+        let out = self.add_batch(tiles, origins);
+        if out.is_err() {
+            self.col = None;
+        }
+        out
+    }
+
+    fn add_batch(&mut self, tiles: &[u8], origins: &[[usize; 3]]) -> Result<Vec<TileStats>> {
         let p = self.model.patch;
         let vox = p.pow(3);
         let count = origins.len();
@@ -281,8 +294,13 @@ impl AfvV2 {
         Ok(ColumnOut { shape, semantic: Some(semantic), tracing: Some(tracing), uncovered, tiles: col.tiles })
     }
 
-    /// Per-kernel GPU time since the last call, when `VOLKIT_METAL_PROFILE` is set, printed to stderr
-    pub fn print_profile(&self) -> Result<()> {
-        self.gpu.print_profile()
+    /// Per-kernel GPU time since the last call, when `VOLKIT_METAL_PROFILE` is set, printed to stderr. It waits for
+    /// the queued work, so a failure there drops the column as [`Self::add`]'s does
+    pub fn print_profile(&mut self) -> Result<()> {
+        let out = self.gpu.print_profile();
+        if out.is_err() {
+            self.col = None;
+        }
+        out
     }
 }
