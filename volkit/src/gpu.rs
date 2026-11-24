@@ -102,6 +102,10 @@ enum Param {
 pub enum Arg {
     /// Address and length in elements of the kernel's slice type
     Slice(u64, u64),
+    /// A raw device pointer, for a C-like kernel entry's `*const T`/`*mut T` param that the PTX marks `.ptr`
+    Ptr(u64),
+    /// A 64-bit unsigned integer passed by value (also a raw pointer the PTX declares as a plain `.u64`)
+    U64(u64),
     /// A 32-bit unsigned integer passed by value
     U32(u32),
     /// A 32-bit float passed by value
@@ -116,6 +120,8 @@ impl Arg {
     fn params(&self) -> &'static [Param] {
         match self {
             Arg::Slice(..) => &[Param::Ptr, Param::U64],
+            Arg::Ptr(_) => &[Param::Ptr],
+            Arg::U64(_) => &[Param::U64],
             // the PTX declares i32 params as .u32 too
             Arg::U32(_) => &[Param::U32],
             Arg::F32(_) => &[Param::F32],
@@ -453,6 +459,7 @@ fn launch_raw(
             Arg::Slice(ptr, len) => {
                 params.extend([ptr as *const u64 as *mut c_void, len as *const u64 as *mut c_void]);
             }
+            Arg::Ptr(v) | Arg::U64(v) => params.push(v as *const u64 as *mut c_void),
             Arg::U32(v) => params.push(v as *const u32 as *mut c_void),
             Arg::F32(v) => params.push(v as *const f32 as *mut c_void),
         }
