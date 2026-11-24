@@ -102,6 +102,10 @@ enum Param {
 pub enum Arg {
     /// Address and length in elements of the kernel's slice type
     Slice(u64, u64),
+    /// A raw device pointer, for a C-like kernel entry's `*const T`/`*mut T` param that the PTX marks `.ptr`
+    Ptr(u64),
+    /// A 64-bit unsigned integer passed by value (also a raw pointer the PTX declares as a plain `.u64`)
+    U64(u64),
     /// A 32-bit unsigned integer passed by value
     U32(u32),
     /// A 32-bit float passed by value
@@ -116,6 +120,8 @@ impl Arg {
     fn params(&self) -> &'static [Param] {
         match self {
             Arg::Slice(..) => &[Param::Ptr, Param::U64],
+            Arg::Ptr(_) => &[Param::Ptr],
+            Arg::U64(_) => &[Param::U64],
             // the PTX declares i32 params as .u32 too
             Arg::U32(_) => &[Param::U32],
             Arg::F32(_) => &[Param::F32],
@@ -321,6 +327,23 @@ impl Gpu {
         Ok(())
     }
 
+    /// Loads another PTX module beside volkit's own, such as a downstream runtime's cuda-oxide kernels: the
+    /// highest tier of `tiers` at or below the device's tier, JIT-compiled by the driver. Its kernels launch
+    /// through [`Module::launch`] on this GPU's stream, checked against their PTX param lists as volkit's are
+    pub fn load_module(&self, tiers: &[(PtxTier, &'static str)]) -> Result<Module> {
+        let device = self.inner.ptx_tier();
+        let Some(&(tier, ptx)) = tiers.iter().filter(|(t, _)| *t <= device).max_by_key(|(t, _)| *t) else {
+            bail!("no PTX tier at or below the device's {device}");
+        };
+        ensure!(ptx.contains(".entry "), "the {tier} PTX module has no kernels");
+        let module = self
+            .inner
+            .context()
+            .load_module(Ptx::from_src(ptx))
+            .wrap_err_with(|| format!("load a {tier} PTX module"))?;
+        Ok(Module { functions: RefCell::new(HashMap::new()), module, ptx, tier })
+    }
+
     fn function(&self, name: &'static str, args: &[Arg]) -> Result<cu::CUfunction> {
         let mut functions = self.functions.borrow_mut();
         if !functions.contains_key(name) {
@@ -343,25 +366,7 @@ impl Gpu {
         args: &[Arg],
     ) -> Result<()> {
         let f = self.function(name, args)?;
-        ensure!(grid.0 as u64 * block.0 as u64 <= 1 << 32, "launch {name}: more than 2^32 threads along x");
-        let mut params: Vec<*mut c_void> = Vec::with_capacity(2 * args.len());
-        for a in args {
-            match a {
-                Arg::Slice(ptr, len) => {
-                    params.extend([ptr as *const u64 as *mut c_void, len as *const u64 as *mut c_void]);
-                }
-                Arg::U32(v) => params.push(v as *const u32 as *mut c_void),
-                Arg::F32(v) => params.push(v as *const f32 as *mut c_void),
-            }
-        }
-        if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
-            return Ok(());
-        }
-        // SAFETY: the params match the kernel's PTX signature and point at `args`, which
-        // outlive the call; the driver copies them at launch
-        unsafe { cur::launch_kernel(f, grid, block, smem, self.cu_stream(), &mut params) }
-            .wrap_err_with(|| format!("launch {name}"))?;
-        Ok(())
+        launch_raw(f, self.cu_stream(), name, grid, block, smem, args)
     }
 
     /// Launches a one-thread-per-element kernel over `n` elements, 256 threads per block
@@ -369,6 +374,104 @@ impl Gpu {
         let n = u32::try_from(n).map_err(|_| eyre!("launch {name}: {n} threads overflow u32"))?;
         self.launch(name, (n.div_ceil(256), 1, 1), (256, 1, 1), 0, args)
     }
+}
+
+/// A PTX module loaded beside volkit's by [`Gpu::load_module`]
+pub struct Module {
+    functions: RefCell<HashMap<&'static str, (cu::CUfunction, Vec<Param>)>>,
+    module: Arc<CudaModule>,
+    ptx: &'static str,
+    tier: PtxTier,
+}
+
+impl Module {
+    /// The tier that loaded
+    pub fn tier(&self) -> PtxTier {
+        self.tier
+    }
+
+    /// Whether the module holds kernel `name`
+    pub fn has(&self, name: &str) -> bool {
+        self.ptx.contains(&format!(".entry {name}("))
+    }
+
+    fn function(&self, name: &'static str, args: &[Arg]) -> Result<cu::CUfunction> {
+        let mut functions = self.functions.borrow_mut();
+        if !functions.contains_key(name) {
+            let f = self.module.load_function(name).wrap_err_with(|| format!("kernel {name}"))?;
+            functions.insert(name, (f.cu_function(), entry_params(self.ptx, name)?));
+        }
+        let (f, params) = &functions[name];
+        let given: Vec<Param> = args.iter().flat_map(|a| a.params().iter().copied()).collect();
+        ensure!(&given == params, "launch {name}: arguments {given:?} do not match the PTX params {params:?}");
+        Ok(*f)
+    }
+
+    /// Launches `name` on `gpu`'s stream with `smem` bytes of dynamic shared memory, failing without launching
+    /// if `args` don't match its PTX params
+    pub fn launch(
+        &self,
+        gpu: &Gpu,
+        name: &'static str,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        smem: u32,
+        args: &[Arg],
+    ) -> Result<()> {
+        let f = self.function(name, args)?;
+        launch_raw(f, gpu.cu_stream(), name, grid, block, smem, args)
+    }
+
+    /// Raises kernel `name`'s dynamic shared-memory limit to `bytes`, for launches above the 48 KiB default
+    pub fn set_max_dynamic_smem(&self, name: &'static str, bytes: u32) -> Result<()> {
+        if !self.functions.borrow().contains_key(name) {
+            let f = self.module.load_function(name).wrap_err_with(|| format!("kernel {name}"))?;
+            self.functions.borrow_mut().insert(name, (f.cu_function(), entry_params(self.ptx, name)?));
+        }
+        let f = self.functions.borrow()[name].0;
+        // SAFETY: a live function of this module's context
+        unsafe {
+            cur::function::set_function_attribute(
+                f,
+                cu::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                bytes as i32,
+            )
+        }
+        .wrap_err_with(|| format!("set {name}'s dynamic shared memory to {bytes}"))?;
+        Ok(())
+    }
+}
+
+/// Launches a loaded function with `args` on `stream`
+fn launch_raw(
+    f: cu::CUfunction,
+    stream: cu::CUstream,
+    name: &'static str,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    smem: u32,
+    args: &[Arg],
+) -> Result<()> {
+    ensure!(grid.0 as u64 * block.0 as u64 <= 1 << 32, "launch {name}: more than 2^32 threads along x");
+    let mut params: Vec<*mut c_void> = Vec::with_capacity(2 * args.len());
+    for a in args {
+        match a {
+            Arg::Slice(ptr, len) => {
+                params.extend([ptr as *const u64 as *mut c_void, len as *const u64 as *mut c_void]);
+            }
+            Arg::Ptr(v) | Arg::U64(v) => params.push(v as *const u64 as *mut c_void),
+            Arg::U32(v) => params.push(v as *const u32 as *mut c_void),
+            Arg::F32(v) => params.push(v as *const f32 as *mut c_void),
+        }
+    }
+    if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
+        return Ok(());
+    }
+    // SAFETY: the params match the kernel's PTX signature and point at `args`, which outlive the call; the
+    // driver copies them at launch
+    unsafe { cur::launch_kernel(f, grid, block, smem, stream, &mut params) }
+        .wrap_err_with(|| format!("launch {name}"))?;
+    Ok(())
 }
 
 /// The embedded PTX of `tier`, checked to be a non-empty build for that target

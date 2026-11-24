@@ -4,6 +4,21 @@ All notable changes to volkit are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The device layer is public, so another runtime can run its own kernels on
+  volkit's GPU. `gpu` is a public module, and `Gpu::load_module` loads a
+  second PTX module (the highest tier at or below the device's) whose
+  kernels launch through `Module::launch` on volkit's stream. Each launch is
+  checked against the kernel's PTX parameters, as volkit's own are, and
+  `Module::set_max_dynamic_smem` raises a kernel's shared-memory limit. The
+  cuDNN and cuBLAS wrappers in `dnn` (`Dnn`, `Blas`, `ConvShape`,
+  `ConvPlan`, `Dtype`, `AlgoPerf` and `gemm_bf16`) are public too.
+- `Arg::Ptr` passes a raw device pointer to a kernel parameter the PTX marks
+  `.ptr`, and `Arg::U64` passes a 64-bit scalar.
+
 ## [0.1.2] - 2026-11-20
 
 ### Added
