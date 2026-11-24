@@ -719,11 +719,20 @@ fn core_graphics_is_linked() {
     assert!(libs.contains("/CoreGraphics.framework/"), "CoreGraphics not linked:\n{libs}");
 }
 
-/// The interior of the head's input after one forward of `tile` on `prog`'s network, Winograd on `winograd`
-fn forward(gpu: &Gpu, (prog, ck): &(Program, Checkpoint), p: usize, winograd: &[usize], tile: &[u8]) -> Vec<f32> {
-    let layout = Layout::new(prog, p, winograd).expect("layout");
+/// The interior of the head's input after one forward of `tile` on [`tiny`]'s network of `stages`, Winograd on
+/// `winograd`; each call builds the network afresh, since a checkpoint gives each tensor once
+fn forward(
+    gpu: &Gpu,
+    stages: &[(usize, usize)],
+    stem_bias: bool,
+    p: usize,
+    winograd: &[usize],
+    tile: &[u8],
+) -> Vec<f32> {
+    let (prog, ck) = tiny(stages, stem_bias);
+    let layout = Layout::new(&prog, p, winograd).expect("layout");
     assert_eq!(layout.winograd(), winograd, "the layout changed the Winograd levels");
-    let net = HostNet::take(ck, prog, Precision::Tf32).expect("host weights");
+    let net = HostNet::take(&ck, &prog, Precision::Tf32).expect("host weights");
     let mut model = Model::new(gpu, &net, &layout).expect("model");
     let table: Vec<f32> = (0..256).map(|v| (v as f32 - 128.0) / 40.0).collect();
     let (bt, btab) = (gpu.upload(tile).unwrap(), gpu.upload(&table).unwrap());
@@ -741,14 +750,14 @@ fn tiny_forward_runs_and_matches_direct() {
     let p = 8;
     let mut rng = Rng(12);
     let tile: Vec<u8> = (0..p * p * p).map(|_| ((rng.f() + 1.0) * 127.9) as u8).collect();
-    let net = tiny(&[(1, 8), (2, 16)], true);
-    let wino = forward(&gpu, &net, p, &[1], &tile);
-    let direct = forward(&gpu, &net, p, &[], &tile);
+    let stages = [(1, 8), (2, 16)];
+    let wino = forward(&gpu, &stages, true, p, &[1], &tile);
+    let direct = forward(&gpu, &stages, true, p, &[], &tile);
     let worst = wino.iter().zip(&direct).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     eprintln!("tiny forward: Winograd against direct, worst {worst:.2e}");
     assert!(worst <= 1e-3, "Winograd forward off the direct one by {worst}");
     assert!(direct.iter().all(|v| v.is_finite()) && direct.iter().any(|&v| v != 0.0), "degenerate forward");
 
-    let no_bias = forward(&gpu, &tiny(&[(1, 8), (2, 16)], false), p, &[1], &tile);
+    let no_bias = forward(&gpu, &stages, false, p, &[1], &tile);
     assert!(no_bias.iter().zip(&wino).all(|(a, b)| a.to_bits() == b.to_bits()), "bias-free stem differs");
 }
