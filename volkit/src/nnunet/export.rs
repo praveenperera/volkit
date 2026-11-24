@@ -421,7 +421,7 @@ fn afv_v2_recipe(plans: &Value, config: &Value, dataset: &Value) -> Result<Value
     Ok(json!({
         "pipeline": "afv-v2",
         "precision": "tf32",
-        "normalization": {"mode": "tile_zscore", "std_floor": 10.0},
+        "normalization": {"mode": "tile_zscore", "std_floor": 9.0},
         "blend": {"mode": "ramp", "border": 16, "overlap": 32},
         "finalize": {"mode": "semantic_tracing_u8"},
     }))
