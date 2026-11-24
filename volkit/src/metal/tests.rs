@@ -753,10 +753,13 @@ fn tiny_forward_runs_and_matches_direct() {
     let stages = [(1, 8), (2, 16)];
     let wino = forward(&gpu, &stages, true, p, &[1], &tile);
     let direct = forward(&gpu, &stages, true, p, &[], &tile);
+    // f32::max drops NaN differences, so both sides must be finite before the comparison means anything
+    assert!(wino.iter().all(|v| v.is_finite()), "Winograd forward is not finite");
+    assert!(direct.iter().all(|v| v.is_finite()) && direct.iter().any(|&v| v != 0.0), "degenerate forward");
+
     let worst = wino.iter().zip(&direct).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     eprintln!("tiny forward: Winograd against direct, worst {worst:.2e}");
     assert!(worst <= 1e-3, "Winograd forward off the direct one by {worst}");
-    assert!(direct.iter().all(|v| v.is_finite()) && direct.iter().any(|&v| v != 0.0), "degenerate forward");
 
     let no_bias = forward(&gpu, &stages, false, p, &[1], &tile);
     assert!(no_bias.iter().zip(&wino).all(|(a, b)| a.to_bits() == b.to_bits()), "bias-free stem differs");
